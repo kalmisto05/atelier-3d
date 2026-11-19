@@ -1,16 +1,9 @@
 import { SCHEMA_VERSION, type Project } from './types';
-import { WALL_SIDES, createWall, newId } from './factory';
+import { DEFAULT_WALL_THICKNESS, LIMITS, MIN_WALLS, newId, rectangleWalls } from './factory';
 
 export class ProjectFormatError extends Error {}
 
 type Migration = (data: any) => any;
-
-/**
- * Migrations successives : MIGRATIONS[n] transforme un projet de version n en version n + 1.
- * Exemple pour une future version 2 :
- *   1: (p) => ({ ...p, schemaVersion: 2, nouveauChamp: valeurParDefaut }),
- */
-const MIGRATIONS: Record<number, Migration> = {};
 
 function isObject(v: unknown): v is Record<string, any> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -18,6 +11,55 @@ function isObject(v: unknown): v is Record<string, any> {
 
 function isPositiveNumber(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v) && v > 0;
+}
+
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v);
+}
+
+function eachRoom(data: any, fn: (room: any) => void): void {
+  for (const floor of data?.house?.floors ?? []) for (const room of floor?.rooms ?? []) if (isObject(room)) fn(room);
+}
+
+/**
+ * Migrations successives : MIGRATIONS[n] transforme un projet de version n en version n + 1.
+ */
+const MIGRATIONS: Record<number, Migration> = {
+  /**
+   * v1 → v2 : la pièce rectangulaire (longueur × largeur, murs nord/est/sud/ouest) devient
+   * une liste de murs. Le tour commence au mur nord et suit le sens horaire, ce qui
+   * conserve exactement les positions des ouvertures existantes.
+   */
+  1: (data) => {
+    eachRoom(data, (room) => {
+      const L = isPositiveNumber(room.length) ? room.length : 400;
+      const W = isPositiveNumber(room.width) ? room.width : 300;
+      const old: any[] = Array.isArray(room.walls) ? room.walls : [];
+      const names: Record<string, string> = { nord: 'Nord', est: 'Est', sud: 'Sud', ouest: 'Ouest' };
+      room.walls = rectangleWalls(L, W).map((w, i) => {
+        const side = ['nord', 'est', 'sud', 'ouest'][i];
+        const prev = old.find((x) => isObject(x) && x.side === side) ?? {};
+        return {
+          ...w,
+          id: prev.id ?? w.id,
+          name: names[side],
+          thickness: isPositiveNumber(prev.thickness) ? prev.thickness : DEFAULT_WALL_THICKNESS,
+          openings: Array.isArray(prev.openings) ? prev.openings : [],
+        };
+      });
+      delete room.length;
+      delete room.width;
+      room.obstacles = [];
+    });
+    return { ...data, schemaVersion: 2 };
+  },
+};
+
+/** Garde les éléments valides d'une liste (les éléments illisibles sont écartés plutôt que de bloquer l'import). */
+function keepValid<T>(list: unknown, valid: (o: any) => boolean): T[] {
+  const items = (Array.isArray(list) ? list : []).filter((o) => isObject(o) && valid(o));
+  for (const o of items) o.id ??= newId();
+  return items as T[];
 }
 
 /**
@@ -53,37 +95,54 @@ export function parseProject(input: unknown): Project {
     }
     floor.id ??= newId();
     floor.name ??= 'Étage';
-    floor.elevation = typeof floor.elevation === 'number' ? floor.elevation : 0;
+    floor.elevation = isFiniteNumber(floor.elevation) ? floor.elevation : 0;
     for (const room of floor.rooms) {
       if (!isObject(room)) throw new ProjectFormatError('Pièce invalide.');
-      for (const key of ['length', 'width', 'height'] as const) {
-        if (!isPositiveNumber(room[key])) {
-          throw new ProjectFormatError(`Dimension « ${key} » invalide pour la pièce « ${room.name ?? '?'} ».`);
-        }
+      const label = `la pièce « ${room.name ?? '?'} »`;
+      if (!isPositiveNumber(room.height)) throw new ProjectFormatError(`Hauteur invalide pour ${label}.`);
+      if (!Array.isArray(room.walls) || room.walls.length < MIN_WALLS) {
+        throw new ProjectFormatError(`Il faut au moins ${MIN_WALLS} murs pour ${label}.`);
       }
       room.id ??= newId();
       room.name ??= 'Pièce';
       room.position ??= { x: 0, y: 0, z: 0 };
       room.furniture = Array.isArray(room.furniture) ? room.furniture : [];
-      // Garantit les 4 murs, dans l'ordre attendu.
-      const walls = Array.isArray(room.walls) ? room.walls : [];
-      room.walls = WALL_SIDES.map((side) => {
-        const w = walls.find((x: any) => isObject(x) && x.side === side);
-        if (!w) return createWall(side);
-        w.thickness = isPositiveNumber(w.thickness) ? w.thickness : createWall(side).thickness;
-        // Les ouvertures illisibles sont écartées plutôt que de bloquer tout l'import.
-        w.openings = (Array.isArray(w.openings) ? w.openings : []).filter(
-          (o: any) =>
-            isObject(o) &&
+      room.walls.forEach((w: any, i: number) => {
+        const ok =
+          isObject(w) &&
+          isPositiveNumber(w.length) &&
+          isFiniteNumber(w.angle) &&
+          w.angle >= LIMITS.wallAngle.min &&
+          w.angle <= LIMITS.wallAngle.max;
+        if (!ok) throw new ProjectFormatError(`Mur ${i + 1} invalide pour ${label}.`);
+        w.id ??= newId();
+        w.name = typeof w.name === 'string' ? w.name : '';
+        w.thickness = isPositiveNumber(w.thickness) ? w.thickness : DEFAULT_WALL_THICKNESS;
+        w.openings = keepValid(
+          w.openings,
+          (o) =>
             (o.kind === 'porte' || o.kind === 'fenetre') &&
             isPositiveNumber(o.width) &&
             isPositiveNumber(o.height) &&
-            Number.isFinite(o.offset) &&
-            Number.isFinite(o.sill),
+            isFiniteNumber(o.offset) &&
+            isFiniteNumber(o.sill),
         );
-        for (const o of w.openings) o.id ??= newId();
-        return w;
+        w.outlets = keepValid(
+          w.outlets,
+          (o) => isPositiveNumber(o.width) && isPositiveNumber(o.height) && isFiniteNumber(o.offset) && isFiniteNumber(o.bottom),
+        );
       });
+      room.obstacles = keepValid(
+        room.obstacles,
+        (o) =>
+          isFiniteNumber(o.x) &&
+          isFiniteNumber(o.z) &&
+          isPositiveNumber(o.width) &&
+          isPositiveNumber(o.depth) &&
+          isFiniteNumber(o.bottom) &&
+          isPositiveNumber(o.height),
+      );
+      for (const o of room.obstacles) o.name = typeof o.name === 'string' ? o.name : 'Obstacle';
     }
   }
 

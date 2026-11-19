@@ -32,9 +32,12 @@ src/
 
 ## Modèle de données
 
-`Projet → Maison → Étages → Pièces → Murs (+ ouvertures) / Meubles → Pièces de bois`
+`Projet → Maison → Étages → Pièces → Murs (+ ouvertures, prises) / Obstacles / Meubles → Pièces de bois`
 
 - Toutes les longueurs sont en **centimètres**, les angles en degrés.
+- Une pièce est une liste de murs parcourue dans le sens des aiguilles d'une montre (vu de
+  dessus) : longueur, angle intérieur du coin suivant (90°, 135°, 270°…), épaisseur.
+  L'écart de fermeture d'un relevé à la main est réparti sur les coins (`src/model/geometry.ts`).
 - Chaque entité a un `id` stable.
 - Le fichier JSON porte un `schemaVersion`. Toute évolution incompatible du format doit
   incrémenter `SCHEMA_VERSION` (`src/model/types.ts`) et ajouter une migration dans

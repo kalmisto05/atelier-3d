@@ -1,40 +1,29 @@
 import type { Project, Room } from '../model/types';
-import { ROOM_LIMITS, clamp, getActiveRoom } from '../model/factory';
+import { LIMITS, getActiveRoom } from '../model/factory';
+import { computePlan } from '../model/geometry';
 import type { ProjectStore } from '../model/store';
+import { bindNumberFields, numberField } from './fields';
+import { ObstaclesSection } from './obstacles';
 import { OpeningsSection } from './openings';
+import { OutletsSection } from './outlets';
+import { WallsSection } from './walls';
 
 export interface PanelActions {
   onRecenter(): void;
+  onTopView(): void;
   onExport(): void;
   onImport(): void;
   onNewProject(): void;
+  onPlaceOutlet(): void;
 }
-
-type DimKey = 'length' | 'width' | 'height';
-
-const DIM_FIELDS: { key: DimKey; label: string }[] = [
-  { key: 'length', label: 'Longueur' },
-  { key: 'width', label: 'Largeur' },
-  { key: 'height', label: 'Hauteur' },
-];
 
 const fmt = new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 2 });
 
-function numberField(id: string, label: string, min: number, max: number): string {
-  return `
-    <label class="field" for="${id}">
-      <span>${label}</span>
-      <span class="input-unit">
-        <input id="${id}" type="number" inputmode="decimal" min="${min}" max="${max}" step="1" required />
-        <span class="unit">cm</span>
-      </span>
-    </label>`;
-}
-
 export class Panel {
   readonly el: HTMLElement;
-  private statusEl!: HTMLElement;
-  private summaryEl!: HTMLElement;
+  readonly outlets: OutletsSection;
+  private statusEl: HTMLElement;
+  private summaryEl: HTMLElement;
 
   constructor(
     private store: ProjectStore,
@@ -59,18 +48,29 @@ export class Panel {
         </label>
       </section>
 
-      <section>
+      <section class="room-section" data-id="room">
         <h2>Pièce</h2>
         <label class="field" for="room-name">
           <span>Nom</span>
           <input id="room-name" type="text" maxlength="80" autocomplete="off" />
         </label>
-        ${DIM_FIELDS.map((f) => numberField(`room-${f.key}`, f.label, ROOM_LIMITS[f.key].min, ROOM_LIMITS[f.key].max)).join('')}
-        ${numberField('wall-thickness', 'Épaisseur des murs', ROOM_LIMITS.thickness.min, ROOM_LIMITS.thickness.max)}
+        <div class="room-height"></div>
         <p class="summary"></p>
       </section>
 
-      <section class="openings-section"></section>
+      <div class="sections"></div>
+
+      <section class="actions">
+        <h2>Vue</h2>
+        <div class="button-row">
+          <button type="button" data-action="recenter">Vue 3D</button>
+          <button type="button" data-action="top">Vue de dessus</button>
+        </div>
+        <p class="hint">
+          <span class="hint-mouse">Souris : clic gauche pour tourner, clic droit pour déplacer, molette pour zoomer.</span>
+          <span class="hint-touch">Tactile : un doigt pour tourner, deux doigts pour zoomer et déplacer.</span>
+        </p>
+      </section>
 
       <section class="actions">
         <h2>Fichier</h2>
@@ -78,26 +78,17 @@ export class Panel {
         <button type="button" data-action="import">Importer…</button>
         <button type="button" data-action="new" class="danger">Nouveau projet</button>
       </section>
-
-      <section class="actions">
-        <h2>Vue</h2>
-        <button type="button" data-action="recenter">Recentrer la vue</button>
-        <p class="hint">
-          <span class="hint-mouse">Souris : clic gauche pour tourner, clic droit pour déplacer, molette pour zoomer.</span>
-          <span class="hint-touch">Tactile : un doigt pour tourner, deux doigts pour zoomer et déplacer.</span>
-        </p>
-      </section>
     `;
 
     this.statusEl = this.el.querySelector('.status')!;
     this.summaryEl = this.el.querySelector('.summary')!;
-    new OpeningsSection(store, this.el.querySelector('.openings-section')!);
 
     const handlers: Record<string, () => void> = {
       export: actions.onExport,
       import: actions.onImport,
       new: actions.onNewProject,
       recenter: actions.onRecenter,
+      top: actions.onTopView,
     };
     this.el.querySelectorAll<HTMLButtonElement>('button[data-action]').forEach((btn) => {
       btn.addEventListener('click', () => handlers[btn.dataset.action!]());
@@ -105,15 +96,19 @@ export class Panel {
 
     this.bindText('project-name', (p, v) => (p.name = v), (p) => p.name);
     this.bindText('room-name', (p, v) => (getActiveRoom(p).name = v), (p) => getActiveRoom(p).name);
-    for (const f of DIM_FIELDS) {
-      this.bindNumber(`room-${f.key}`, ROOM_LIMITS[f.key], (room, v) => (room[f.key] = v), (room) => room[f.key]);
+
+    const roomSection = this.el.querySelector<HTMLElement>('.room-section')!;
+    bindNumberFields(roomSection, store, {
+      get: (room) => room.height,
+      set: (room, _id, _key, v) => (room.height = v),
+      limits: () => LIMITS.roomHeight,
+    });
+
+    const sections = this.el.querySelector('.sections')!;
+    this.outlets = new OutletsSection(store, actions.onPlaceOutlet);
+    for (const s of [new WallsSection(store), new OpeningsSection(store), this.outlets, new ObstaclesSection(store)]) {
+      sections.appendChild(s.root);
     }
-    this.bindNumber(
-      'wall-thickness',
-      ROOM_LIMITS.thickness,
-      (room, v) => room.walls.forEach((w) => (w.thickness = v)),
-      (room) => room.walls[0].thickness,
-    );
 
     store.subscribe((project, source) => {
       if (source === 'load') this.fill(project);
@@ -132,15 +127,14 @@ export class Panel {
     const room = getActiveRoom(project);
     this.input('project-name').value = project.name;
     this.input('room-name').value = room.name;
-    for (const f of DIM_FIELDS) this.input(`room-${f.key}`).value = String(room[f.key]);
-    this.input('wall-thickness').value = String(room.walls[0].thickness);
+    this.el.querySelector('.room-height')!.innerHTML = numberField('room', 'height', 'Hauteur sous plafond', room.height);
     this.updateSummary(room);
   }
 
   private updateSummary(room: Room): void {
-    const surface = (room.length * room.width) / 10000;
-    const volume = (room.length * room.width * room.height) / 1e6;
-    this.summaryEl.textContent = `Surface au sol : ${fmt.format(surface)} m² · Volume : ${fmt.format(volume)} m³`;
+    const area = Math.abs(computePlan(room).area) / 10000;
+    const volume = (area * room.height) / 100;
+    this.summaryEl.textContent = `Surface au sol : ${fmt.format(area)} m² · Volume : ${fmt.format(volume)} m³`;
   }
 
   private input(id: string): HTMLInputElement {
@@ -155,33 +149,6 @@ export class Panel {
     });
     input.addEventListener('change', () => {
       if (!input.value.trim()) input.value = get(this.store.project);
-    });
-  }
-
-  /**
-   * Champ numérique : la vue se met à jour en direct tant que la valeur est valide ;
-   * à la validation (perte de focus / Entrée), la valeur est ramenée dans les bornes.
-   */
-  private bindNumber(
-    id: string,
-    limits: { min: number; max: number },
-    set: (room: Room, v: number) => void,
-    get: (room: Room) => number,
-  ): void {
-    const input = this.input(id);
-    const parse = () => Number(input.value.replace(',', '.'));
-    input.addEventListener('input', () => {
-      const v = parse();
-      const valid = input.value !== '' && Number.isFinite(v) && v >= limits.min && v <= limits.max;
-      input.classList.toggle('invalid', !valid);
-      if (valid) this.store.update((p) => set(getActiveRoom(p), v));
-    });
-    input.addEventListener('change', () => {
-      const v = parse();
-      const fixed = Number.isFinite(v) && input.value !== '' ? clamp(Math.round(v * 10) / 10, limits.min, limits.max) : get(getActiveRoom(this.store.project));
-      input.value = String(fixed);
-      input.classList.remove('invalid');
-      if (fixed !== get(getActiveRoom(this.store.project))) this.store.update((p) => set(getActiveRoom(p), fixed));
     });
   }
 }

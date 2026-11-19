@@ -1,37 +1,78 @@
 import './style.css';
-import { createProject, getActiveRoom } from './model/factory';
+import { createOutlet, createProject, findWall, getActiveRoom } from './model/factory';
 import { parseProject } from './model/migrate';
 import { ProjectStore } from './model/store';
-import type { Project } from './model/types';
+import { SCHEMA_VERSION, type Project } from './model/types';
 import { createAutosaver, loadCurrentProject } from './storage/db';
 import { exportProject, pickProjectFile } from './storage/file';
 import { Panel } from './ui/panel';
 import { Viewer } from './viewer/viewer';
 
-async function loadInitialProject(): Promise<{ project: Project; restored: boolean }> {
+async function loadInitialProject(): Promise<{ project: Project; restored: boolean; needsSave: boolean }> {
   try {
     const stored = await loadCurrentProject();
-    if (stored) return { project: parseProject(stored), restored: true };
+    if (stored) {
+      const project = parseProject(stored);
+      // Un projet converti depuis un ancien format est réenregistré dans le format courant.
+      const needsSave = (stored as { schemaVersion?: number }).schemaVersion !== SCHEMA_VERSION;
+      return { project, restored: true, needsSave };
+    }
   } catch (err) {
     console.warn('Impossible de relire la sauvegarde locale, nouveau projet créé.', err);
   }
-  return { project: createProject(), restored: false };
+  return { project: createProject(), restored: false, needsSave: true };
 }
 
 async function main() {
   const app = document.getElementById('app')!;
   app.innerHTML = `
-    <main class="viewport" id="viewport" aria-label="Vue 3D de la pièce"></main>
+    <main class="viewport" id="viewport" aria-label="Vue 3D de la pièce">
+      <div class="banner" hidden role="status">
+        <span>Touchez un mur pour y placer la prise</span>
+        <button type="button" class="small">Annuler</button>
+      </div>
+    </main>
     <button type="button" class="panel-toggle" aria-controls="panel" aria-expanded="false">Réglages</button>
   `;
 
   // La vue est créée avant la lecture d'IndexedDB pour afficher la scène sans attendre.
-  const viewer = new Viewer(document.getElementById('viewport')!);
-  const { project, restored } = await loadInitialProject();
+  const viewport = document.getElementById('viewport')!;
+  const viewer = new Viewer(viewport);
+  const { project, restored, needsSave } = await loadInitialProject();
   const store = new ProjectStore(project);
+
+  // ---------- Placement d'une prise en touchant un mur ----------
+  const banner = viewport.querySelector<HTMLElement>('.banner')!;
+  let placing = false;
+  const setPlacing = (active: boolean) => {
+    placing = active;
+    banner.hidden = !active;
+    viewer.setCursor(active ? 'crosshair' : '');
+    panel.outlets.setPlacing(active);
+  };
+  banner.querySelector('button')!.addEventListener('click', () => setPlacing(false));
+  viewer.onTap((hit) => {
+    if (!placing) return;
+    if (!hit) return; // touché à côté d'un mur : on reste en mode placement
+    let id = '';
+    store.update((p) => {
+      const wall = findWall(getActiveRoom(p), hit.wallId);
+      if (!wall) return;
+      const outlet = createOutlet(wall, hit.u);
+      id = outlet.id;
+      wall.outlets.push(outlet);
+    });
+    setPlacing(false);
+    if (id) panel.outlets.revealOutlet(id);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && placing) setPlacing(false);
+  });
 
   const panel = new Panel(store, {
     onRecenter: () => viewer.frameRoom(getActiveRoom(store.project)),
+    onTopView: () => viewer.frameTop(getActiveRoom(store.project)),
+    onPlaceOutlet: () => setPlacing(!placing),
     onExport: () => exportProject(store.project),
     onImport: async () => {
       try {
@@ -68,7 +109,7 @@ async function main() {
 
   viewer.setRoom(getActiveRoom(store.project), { reframe: true });
   panel.setStatus(restored ? 'Projet restauré' : 'Nouveau projet', 'ok');
-  if (!restored) autosaver.schedule(store.project);
+  if (needsSave) autosaver.schedule(store.project);
 
   // Sur mobile, l'appli peut être tuée en arrière-plan : on écrit immédiatement en quittant.
   document.addEventListener('visibilitychange', () => {

@@ -5,3 +5,7 @@ dev-dist
 .DS_Store
 .vscode/*
 !.vscode/extensions.json
+
+# Documents personnels (relevés, croquis) : jamais publiés
+croquis*
+*.atelier3d.json

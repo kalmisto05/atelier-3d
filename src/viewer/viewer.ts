@@ -1,8 +1,17 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import type { OpeningKind, Room, Wall, WallSide } from '../model/types';
-import { WALL_LABELS, wallLength } from '../model/factory';
+import type { Room } from '../model/types';
+import {
+  clipConvex,
+  computePlan,
+  dot,
+  insideSegments,
+  wallPoint,
+  type Pt,
+  type RoomPlan,
+  type WallGeom,
+} from '../model/geometry';
 
 /** Unité de la scène : 1 = 1 cm, comme le modèle. */
 
@@ -14,10 +23,16 @@ const COLORS = {
   wallEdge: 0x7a6a58,
   frame: 0xa8743f,
   glass: 0x9ec9e6,
+  outlet: 0xfbfbf7,
+  outletEdge: 0x555049,
+  obstacle: 0xb7a48d,
+  obstacleEdge: 0x6b5a48,
 };
 
 const FRAME_WIDTH = 5;
 const FRAME_DEPTH = 6;
+/** Saillie des prises par rapport au mur. */
+const OUTLET_DEPTH = 1.5;
 
 /** Matériau qui s'estompe quand son mur est entre la caméra et la pièce. */
 interface Fadeable {
@@ -27,7 +42,8 @@ interface Fadeable {
 }
 
 interface WallView {
-  side: WallSide;
+  geom: WallGeom;
+  mesh: THREE.Mesh;
   fadeables: Fadeable[];
   /** Normale sortante et point du parement extérieur, dans le repère de la scène. */
   normal: THREE.Vector3;
@@ -35,12 +51,62 @@ interface WallView {
   faded: boolean;
 }
 
-/** Rectangle dans le plan du mur : u le long du mur (vu de l'intérieur, de gauche à droite), y vers le haut. */
-interface Rect {
-  u0: number;
-  u1: number;
-  y0: number;
-  y1: number;
+/** Point touché sur le parement intérieur d'un mur. */
+export interface WallHit {
+  wallId: string;
+  /** Position le long du mur depuis son début (cm). */
+  u: number;
+  /** Hauteur depuis le sol (cm). */
+  y: number;
+}
+
+/**
+ * Prisme droit : polygone convexe du plan extrudé entre les hauteurs y0 et y1.
+ * Géométrie non indexée avec normales par face (rendu à facettes nettes).
+ */
+function prism(poly: Pt[], y0: number, y1: number): THREE.BufferGeometry | null {
+  if (poly.length < 3 || y1 - y0 < 0.01) return null;
+  const pos: number[] = [];
+  const nor: number[] = [];
+  const c = poly.reduce((s, p) => ({ x: s.x + p.x / poly.length, z: s.z + p.z / poly.length }), { x: 0, z: 0 });
+  const tri = (a: THREE.Vector3, b: THREE.Vector3, d: THREE.Vector3, expected: THREE.Vector3) => {
+    const n = new THREE.Vector3().subVectors(b, a).cross(new THREE.Vector3().subVectors(d, a));
+    if (n.lengthSq() < 1e-10) return;
+    if (n.dot(expected) < 0) [b, d] = [d, b];
+    n.normalize();
+    if (n.dot(expected) < 0) n.negate();
+    for (const v of [a, b, d]) {
+      pos.push(v.x, v.y, v.z);
+      nor.push(n.x, n.y, n.z);
+    }
+  };
+  const v = (p: Pt, y: number) => new THREE.Vector3(p.x, y, p.z);
+  const up = new THREE.Vector3(0, 1, 0);
+  const down = new THREE.Vector3(0, -1, 0);
+  for (let i = 1; i + 1 < poly.length; i++) {
+    tri(v(poly[0], y1), v(poly[i], y1), v(poly[i + 1], y1), up);
+    tri(v(poly[0], y0), v(poly[i], y0), v(poly[i + 1], y0), down);
+  }
+  for (let i = 0; i < poly.length; i++) {
+    const p = poly[i];
+    const q = poly[(i + 1) % poly.length];
+    const mid = { x: (p.x + q.x) / 2 - c.x, z: (p.z + q.z) / 2 - c.z };
+    const out = new THREE.Vector3(mid.x, 0, mid.z);
+    tri(v(p, y0), v(q, y0), v(q, y1), out);
+    tri(v(p, y0), v(q, y1), v(p, y1), out);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  return g;
+}
+
+function merge(list: (THREE.BufferGeometry | null)[]): THREE.BufferGeometry | null {
+  const geoms = list.filter((g): g is THREE.BufferGeometry => g !== null);
+  if (!geoms.length) return null;
+  const merged = mergeGeometries(geoms);
+  geoms.forEach((g) => g.dispose());
+  return merged;
 }
 
 export class Viewer {
@@ -50,10 +116,14 @@ export class Viewer {
   private controls: OrbitControls;
   /** Groupe centré sur la pièce : l'origine de la scène est au centre du sol. */
   private roomGroup = new THREE.Group();
+  private content = new THREE.Group();
   private walls: WallView[] = [];
+  private plan: RoomPlan | null = null;
   private needsRender = true;
   private lastRoomKey = '';
   private tmp = new THREE.Vector3();
+  private raycaster = new THREE.Raycaster();
+  private tapListeners = new Set<(hit: WallHit | null) => void>();
 
   constructor(private container: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -81,6 +151,7 @@ export class Viewer {
     this.controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
     this.controls.addEventListener('change', () => this.requestRender());
 
+    this.setupTap();
     new ResizeObserver(() => this.resize()).observe(container);
     this.resize();
     this.renderer.setAnimationLoop(() => this.tick());
@@ -90,9 +161,19 @@ export class Viewer {
     this.needsRender = true;
   }
 
+  /** Abonnement aux « touchers » (clic ou tape sans glisser) sur la vue 3D. */
+  onTap(listener: (hit: WallHit | null) => void): () => void {
+    this.tapListeners.add(listener);
+    return () => this.tapListeners.delete(listener);
+  }
+
+  setCursor(cursor: string): void {
+    this.renderer.domElement.style.cursor = cursor;
+  }
+
   /** Reconstruit la géométrie de la pièce si elle a changé. Recadre la caméra sur demande. */
   setRoom(room: Room, options: { reframe?: boolean } = {}): void {
-    const key = JSON.stringify([room.id, room.length, room.width, room.height, room.walls]);
+    const key = JSON.stringify(room);
     const changed = key !== this.lastRoomKey;
     this.lastRoomKey = key;
     if (!changed && !options.reframe) return;
@@ -107,15 +188,26 @@ export class Viewer {
 
   /** Recentre la caméra sur la pièce en vue 3/4. */
   frameRoom(room: Room): void {
-    const size = Math.max(room.length, room.width, room.height);
+    this.frame(room, new THREE.Vector3(0.6, 0.6, 0.75));
+  }
+
+  /** Vue de dessus, comme un plan. */
+  frameTop(room: Room): void {
+    this.frame(room, new THREE.Vector3(0, 1, 0.0001));
+  }
+
+  private frame(room: Room, direction: THREE.Vector3): void {
+    const plan = this.plan ?? computePlan(room);
+    const sx = plan.bbox.maxX - plan.bbox.minX;
+    const sz = plan.bbox.maxZ - plan.bbox.minZ;
+    const size = Math.max(sx, sz, room.height);
     // Distance pour que la sphère englobant la pièce tienne dans le champ, en portrait comme en paysage.
-    const radius = 0.5 * Math.hypot(room.length, room.width, room.height);
+    const radius = 0.5 * Math.hypot(sx, sz, room.height);
     const halfV = THREE.MathUtils.degToRad(this.camera.fov / 2);
     const halfH = Math.atan(Math.tan(halfV) * this.camera.aspect);
     const dist = (radius / Math.sin(Math.min(halfV, halfH))) * 1.02;
-    const dir = new THREE.Vector3(0.6, 0.6, 0.75).normalize();
     this.controls.target.set(0, room.height * 0.35, 0);
-    this.camera.position.copy(this.controls.target).addScaledVector(dir, dist);
+    this.camera.position.copy(this.controls.target).addScaledVector(direction.clone().normalize(), dist);
     this.controls.minDistance = 30;
     this.controls.maxDistance = size * 6;
     this.controls.update();
@@ -138,71 +230,80 @@ export class Viewer {
   }
 
   private buildRoom(room: Room): void {
-    const { length: L, width: W } = room;
-    // Le repère de la pièce a son origine au coin intérieur ; on le décale pour centrer la vue.
-    const content = new THREE.Group();
-    content.position.set(-L / 2, 0, -W / 2);
-    this.roomGroup.add(content);
+    const plan = computePlan(room);
+    this.plan = plan;
+    // Le plan a son origine au début du mur 1 ; on le décale pour centrer la vue.
+    this.content = new THREE.Group();
+    this.content.position.set(-(plan.bbox.minX + plan.bbox.maxX) / 2, 0, -(plan.bbox.minZ + plan.bbox.maxZ) / 2);
+    this.roomGroup.add(this.content);
 
+    // Sol : la forme est définie dans le plan XY puis couchée (Y du dessin → −Z de la scène).
+    const shape = new THREE.Shape(plan.polygon.map((p) => new THREE.Vector2(p.x, -p.z)));
     const floor = new THREE.Mesh(
-      new THREE.PlaneGeometry(L, W),
+      new THREE.ShapeGeometry(shape),
       new THREE.MeshStandardMaterial({ color: COLORS.floor, roughness: 0.9 }),
     );
     floor.rotation.x = -Math.PI / 2;
-    floor.position.set(L / 2, 0, W / 2);
-    content.add(floor);
-    content.add(this.buildGrid(L, W, 50));
+    this.content.add(floor, this.buildGrid(plan, 50));
 
-    for (const wall of room.walls) {
-      const view = this.buildWall(room, wall, content);
-      view.outerPoint.add(content.position);
+    const labelSize = THREE.MathUtils.clamp(
+      Math.max(plan.bbox.maxX - plan.bbox.minX, plan.bbox.maxZ - plan.bbox.minZ) * 0.05,
+      14,
+      50,
+    );
+    for (const g of plan.walls) {
+      const view = this.buildWall(room, g);
+      view.outerPoint.add(this.content.position);
       this.walls.push(view);
+
+      const label = this.makeLabel(String(g.index + 1));
+      label.scale.set(labelSize, labelSize, 1);
+      const p = wallPoint(g, g.length / 2, -Math.min(labelSize * 1.2, g.length / 2));
+      label.position.set(p.x, 1, p.z);
+      this.content.add(label);
+    }
+
+    for (const o of room.obstacles) {
+      const poly = [
+        { x: o.x, z: o.z },
+        { x: o.x + o.width, z: o.z },
+        { x: o.x + o.width, z: o.z + o.depth },
+        { x: o.x, z: o.z + o.depth },
+      ];
+      const top = Math.min(o.bottom + o.height, room.height);
+      const geom = prism(poly, o.bottom, top);
+      if (!geom) continue;
+      const mesh = new THREE.Mesh(
+        geom,
+        new THREE.MeshStandardMaterial({ color: COLORS.obstacle, roughness: 0.9, transparent: true, opacity: 0.85 }),
+      );
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(geom),
+        new THREE.LineBasicMaterial({ color: COLORS.obstacleEdge }),
+      );
+      this.content.add(mesh, edges);
     }
   }
 
-  /**
-   * Passe des coordonnées du mur (u le long du mur, y vers le haut, d profondeur depuis
-   * le parement intérieur vers l'extérieur) au repère de la pièce.
-   */
-  private wallToRoom(room: Room, side: WallSide, u: number, y: number, d: number): THREE.Vector3 {
-    const { length: L, width: W } = room;
-    switch (side) {
-      case 'nord':
-        return new THREE.Vector3(u, y, -d);
-      case 'sud':
-        return new THREE.Vector3(L - u, y, W + d);
-      case 'est':
-        return new THREE.Vector3(L + d, y, u);
-      case 'ouest':
-        return new THREE.Vector3(-d, y, W - u);
-    }
-  }
-
-  /** Pavé aligné sur le mur, couvrant le rectangle `r` sur la profondeur [d0, d1]. */
-  private wallBox(room: Room, side: WallSide, r: Rect, d0: number, d1: number): THREE.BoxGeometry {
-    const du = r.u1 - r.u0;
-    const dy = r.y1 - r.y0;
-    const dd = d1 - d0;
-    const alongX = side === 'nord' || side === 'sud';
-    const geom = alongX ? new THREE.BoxGeometry(du, dy, dd) : new THREE.BoxGeometry(dd, dy, du);
-    const c = this.wallToRoom(room, side, (r.u0 + r.u1) / 2, (r.y0 + r.y1) / 2, (d0 + d1) / 2);
-    geom.translate(c.x, c.y, c.z);
-    return geom;
-  }
-
-  private buildWall(room: Room, wall: Wall, parent: THREE.Group): WallView {
-    const side = wall.side;
+  private buildWall(room: Room, g: WallGeom): WallView {
+    const wall = g.wall;
     const t = wall.thickness;
     const H = room.height;
-    const len = wallLength(room, side);
-    const thick = Object.fromEntries(room.walls.map((w) => [w.side, w.thickness])) as Record<WallSide, number>;
+    const len = g.length;
+    const p = (u: number, d: number) => wallPoint(g, u, d);
+    const uOf = (q: Pt) => dot({ x: q.x - g.a.x, z: q.z - g.a.z }, g.dir);
+    /** Tranche du mur entre u0 et u1 (bornes facultatives), en tenant compte des onglets aux coins. */
+    const quad = [g.a, g.b, g.ob, g.oa];
+    const slice = (u0: number, u1: number) => {
+      let poly = quad;
+      if (Number.isFinite(u0)) poly = clipConvex(poly, (q) => uOf(q) - u0);
+      if (Number.isFinite(u1)) poly = clipConvex(poly, (q) => u1 - uOf(q));
+      return poly;
+    };
+    const rect = (u0: number, u1: number, d0: number, d1: number) => [p(u0, d0), p(u1, d0), p(u1, d1), p(u0, d1)];
 
-    // Les murs nord et sud recouvrent les angles ; est et ouest s'arrêtent à leurs parements.
-    const [uMin, uMax] =
-      side === 'nord' ? [-thick.ouest, len + thick.est] : side === 'sud' ? [-thick.est, len + thick.ouest] : [0, len];
-
-    // Ouvertures rognées aux limites du mur (utile si la pièce a été réduite après coup).
-    const holes: (Rect & { kind: OpeningKind })[] = wall.openings
+    // Ouvertures rognées aux limites du mur (utile si la pièce a été modifiée après coup).
+    const holes = wall.openings
       .map((o) => ({
         kind: o.kind,
         u0: Math.max(0, o.offset),
@@ -212,24 +313,25 @@ export class Viewer {
       }))
       .filter((r) => r.u1 - r.u0 > 0.5 && r.y1 - r.y0 > 0.5);
 
-    // Découpage en colonnes verticales : dans chaque colonne, la maçonnerie est
+    // Découpage en tranches verticales : dans chaque tranche, la maçonnerie est
     // la hauteur totale moins la réunion des ouvertures qui la traversent.
-    const cuts = [...new Set([uMin, uMax, ...holes.flatMap((h) => [h.u0, h.u1])])].sort((a, b) => a - b);
-    const solids: THREE.BoxGeometry[] = [];
+    const cuts = [-Infinity, ...[...new Set(holes.flatMap((h) => [h.u0, h.u1]))].sort((x, y) => x - y), Infinity];
+    const solids: (THREE.BufferGeometry | null)[] = [];
     for (let i = 0; i < cuts.length - 1; i++) {
       const u0 = cuts[i];
       const u1 = cuts[i + 1];
       if (u1 - u0 < 0.01) continue;
+      const poly = slice(u0, u1);
       const gaps = holes
         .filter((h) => h.u0 <= u0 + 1e-6 && h.u1 >= u1 - 1e-6)
         .map((h) => [h.y0, h.y1] as const)
-        .sort((a, b) => a[0] - b[0]);
+        .sort((x, y) => x[0] - y[0]);
       let y = 0;
       for (const [g0, g1] of gaps) {
-        if (g0 > y) solids.push(this.wallBox(room, side, { u0, u1, y0: y, y1: g0 }, 0, t));
+        if (g0 > y) solids.push(prism(poly, y, g0));
         y = Math.max(y, g1);
       }
-      if (y < H) solids.push(this.wallBox(room, side, { u0, u1, y0: y, y1: H }, 0, t));
+      if (y < H) solids.push(prism(poly, y, H));
     }
 
     const fadeables: Fadeable[] = [];
@@ -239,102 +341,134 @@ export class Viewer {
       return material;
     };
 
-    const wallMat = fade(new THREE.MeshStandardMaterial({ color: COLORS.wall, roughness: 0.95 }), 0.12);
-    const masonry = mergeGeometries(solids);
-    solids.forEach((g) => g.dispose());
-    parent.add(new THREE.Mesh(masonry, wallMat));
+    const masonry = merge(solids) ?? new THREE.BufferGeometry();
+    const mesh = new THREE.Mesh(
+      masonry,
+      fade(new THREE.MeshStandardMaterial({ color: COLORS.wall, roughness: 0.95 }), 0.12),
+    );
+    mesh.userData.wallId = wall.id;
+    this.content.add(mesh);
 
-    // Arêtes : contour du mur + contour de chaque ouverture sur les deux faces et dans l'épaisseur.
+    // Arêtes : contour du mur, contour de chaque ouverture sur les deux faces et dans l'épaisseur.
     const pts: number[] = [];
-    const seg = (a: THREE.Vector3, b: THREE.Vector3) => pts.push(a.x, a.y, a.z, b.x, b.y, b.z);
-    const p = (u: number, y: number, d: number) => this.wallToRoom(room, side, u, y, d);
-    const rectOutline = (r: Rect, d: number) => {
-      seg(p(r.u0, r.y0, d), p(r.u1, r.y0, d));
-      seg(p(r.u1, r.y0, d), p(r.u1, r.y1, d));
-      seg(p(r.u1, r.y1, d), p(r.u0, r.y1, d));
-      seg(p(r.u0, r.y1, d), p(r.u0, r.y0, d));
-    };
-    rectOutline({ u0: uMin, u1: uMax, y0: 0, y1: H }, 0);
-    rectOutline({ u0: uMin, u1: uMax, y0: 0, y1: H }, t);
-    for (const [u, y] of [[uMin, 0], [uMax, 0], [uMin, H], [uMax, H]]) seg(p(u, y, 0), p(u, y, t));
+    const seg = (a: Pt, ya: number, b: Pt, yb: number) => pts.push(a.x, ya, a.z, b.x, yb, b.z);
+    seg(g.a, 0, g.b, 0);
+    seg(g.a, H, g.b, H);
+    seg(g.oa, 0, g.ob, 0);
+    seg(g.oa, H, g.ob, H);
+    seg(g.b, H, g.ob, H);
+    seg(g.oa, H, g.a, H);
+    for (const c of [g.a, g.oa]) seg(c, 0, c, H);
     for (const h of holes) {
-      rectOutline(h, 0);
-      rectOutline(h, t);
-      for (const [u, y] of [[h.u0, h.y0], [h.u1, h.y0], [h.u0, h.y1], [h.u1, h.y1]]) seg(p(u, y, 0), p(u, y, t));
+      for (const d of [0, t]) {
+        seg(p(h.u0, d), h.y0, p(h.u1, d), h.y0);
+        seg(p(h.u1, d), h.y0, p(h.u1, d), h.y1);
+        seg(p(h.u1, d), h.y1, p(h.u0, d), h.y1);
+        seg(p(h.u0, d), h.y1, p(h.u0, d), h.y0);
+      }
+      for (const [u, y] of [[h.u0, h.y0], [h.u1, h.y0], [h.u0, h.y1], [h.u1, h.y1]]) seg(p(u, 0), y, p(u, t), y);
     }
     const edgeGeom = new THREE.BufferGeometry();
     edgeGeom.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
-    parent.add(new THREE.LineSegments(edgeGeom, fade(new THREE.LineBasicMaterial({ color: COLORS.wallEdge }), 0.35)));
+    this.content.add(new THREE.LineSegments(edgeGeom, fade(new THREE.LineBasicMaterial({ color: COLORS.wallEdge }), 0.35)));
 
     // Menuiseries : cadre (sans traverse basse pour une porte) et vitre pour une fenêtre.
-    const frames: THREE.BoxGeometry[] = [];
-    const glasses: THREE.BoxGeometry[] = [];
+    // Dans un mur épais (embrasure), la fenêtre est posée près du parement extérieur.
     const fd = Math.min(FRAME_DEPTH, t);
-    const [d0, d1] = [(t - fd) / 2, (t + fd) / 2];
+    const d0 = t <= 2 * FRAME_DEPTH ? (t - fd) / 2 : t - fd - 4;
+    const d1 = d0 + fd;
+    const frames: (THREE.BufferGeometry | null)[] = [];
+    const glasses: (THREE.BufferGeometry | null)[] = [];
     for (const h of holes) {
       const fw = Math.min(FRAME_WIDTH, (h.u1 - h.u0) / 4, (h.y1 - h.y0) / 4);
       frames.push(
-        this.wallBox(room, side, { u0: h.u0, u1: h.u0 + fw, y0: h.y0, y1: h.y1 }, d0, d1),
-        this.wallBox(room, side, { u0: h.u1 - fw, u1: h.u1, y0: h.y0, y1: h.y1 }, d0, d1),
-        this.wallBox(room, side, { u0: h.u0 + fw, u1: h.u1 - fw, y0: h.y1 - fw, y1: h.y1 }, d0, d1),
+        prism(rect(h.u0, h.u0 + fw, d0, d1), h.y0, h.y1),
+        prism(rect(h.u1 - fw, h.u1, d0, d1), h.y0, h.y1),
+        prism(rect(h.u0 + fw, h.u1 - fw, d0, d1), h.y1 - fw, h.y1),
       );
       if (h.kind === 'fenetre') {
-        frames.push(this.wallBox(room, side, { u0: h.u0 + fw, u1: h.u1 - fw, y0: h.y0, y1: h.y0 + fw }, d0, d1));
-        glasses.push(
-          this.wallBox(room, side, { u0: h.u0 + fw, u1: h.u1 - fw, y0: h.y0 + fw, y1: h.y1 - fw }, t / 2 - 0.5, t / 2 + 0.5),
-        );
+        frames.push(prism(rect(h.u0 + fw, h.u1 - fw, d0, d1), h.y0, h.y0 + fw));
+        const dm = (d0 + d1) / 2;
+        glasses.push(prism(rect(h.u0 + fw, h.u1 - fw, dm - 0.5, dm + 0.5), h.y0 + fw, h.y1 - fw));
       }
     }
-    if (frames.length) {
-      parent.add(
-        new THREE.Mesh(
-          mergeGeometries(frames),
-          fade(new THREE.MeshStandardMaterial({ color: COLORS.frame, roughness: 0.7 }), 0.15),
-        ),
+    const frameGeom = merge(frames);
+    if (frameGeom) {
+      this.content.add(
+        new THREE.Mesh(frameGeom, fade(new THREE.MeshStandardMaterial({ color: COLORS.frame, roughness: 0.7 }), 0.15)),
       );
-      frames.forEach((g) => g.dispose());
     }
-    if (glasses.length) {
+    const glassGeom = merge(glasses);
+    if (glassGeom) {
       const glassMat = fade(
         new THREE.MeshStandardMaterial({ color: COLORS.glass, roughness: 0.1, opacity: 0.35, depthWrite: false }),
         0.06,
       );
-      parent.add(new THREE.Mesh(mergeGeometries(glasses), glassMat));
-      glasses.forEach((g) => g.dispose());
+      this.content.add(new THREE.Mesh(glassGeom, glassMat));
     }
 
-    // Nom du mur, posé au sol devant son parement intérieur.
-    const label = this.makeLabel(WALL_LABELS[side]);
-    const labelSize = Math.max(30, Math.min(room.length, room.width) * 0.12);
-    label.scale.set(labelSize * 2, labelSize * 0.5, 1);
-    label.position.copy(p(len / 2, 2, -labelSize * 0.6));
-    parent.add(label);
+    // Prises : petits pavés en légère saillie sur le parement intérieur.
+    const outletGeoms: (THREE.BufferGeometry | null)[] = [];
+    const outletLines: number[] = [];
+    for (const o of wall.outlets) {
+      const u0 = Math.max(0, o.offset);
+      const u1 = Math.min(len, o.offset + o.width);
+      const y0 = Math.max(0, o.bottom);
+      const y1 = Math.min(H, o.bottom + o.height);
+      if (u1 - u0 < 0.5 || y1 - y0 < 0.5) continue;
+      outletGeoms.push(prism(rect(u0, u1, -OUTLET_DEPTH, 0), y0, y1));
+      const d = -OUTLET_DEPTH - 0.05;
+      const corners: [number, number][] = [[u0, y0], [u1, y0], [u1, y1], [u0, y1]];
+      corners.forEach(([u, y], k) => {
+        const [un, yn] = corners[(k + 1) % 4];
+        const a = p(u, d);
+        const b = p(un, d);
+        outletLines.push(a.x, y, a.z, b.x, yn, b.z);
+      });
+      // Deux trous de fiche, pour reconnaître une prise au premier coup d'œil.
+      const cy = (y0 + y1) / 2;
+      const r = Math.min(u1 - u0, y1 - y0) * 0.08;
+      for (const cu of [(u0 * 2 + u1) / 3, (u0 + u1 * 2) / 3]) {
+        const a = p(cu - r, d);
+        const b = p(cu + r, d);
+        outletLines.push(a.x, cy, a.z, b.x, cy, b.z);
+      }
+    }
+    const outletGeom = merge(outletGeoms);
+    if (outletGeom) {
+      this.content.add(
+        new THREE.Mesh(outletGeom, fade(new THREE.MeshStandardMaterial({ color: COLORS.outlet, roughness: 0.5 }), 0.2)),
+      );
+      const lg = new THREE.BufferGeometry();
+      lg.setAttribute('position', new THREE.Float32BufferAttribute(outletLines, 3));
+      this.content.add(new THREE.LineSegments(lg, fade(new THREE.LineBasicMaterial({ color: COLORS.outletEdge }), 0.3)));
+    }
 
-    const normalBySide: Record<WallSide, [number, number, number]> = {
-      nord: [0, 0, -1],
-      sud: [0, 0, 1],
-      est: [1, 0, 0],
-      ouest: [-1, 0, 0],
-    };
+    const mid = p(len / 2, t);
     return {
-      side,
+      geom: g,
+      mesh,
       fadeables,
-      normal: new THREE.Vector3(...normalBySide[side]),
-      outerPoint: p(len / 2, H / 2, t),
+      normal: new THREE.Vector3(g.out.x, 0, g.out.z),
+      outerPoint: new THREE.Vector3(mid.x, H / 2, mid.z),
       faded: false,
     };
   }
 
   private makeLabel(text: string): THREE.Sprite {
     const canvas = document.createElement('canvas');
-    canvas.width = 256;
-    canvas.height = 64;
+    canvas.width = 128;
+    canvas.height = 128;
     const ctx = canvas.getContext('2d')!;
-    ctx.font = '600 38px system-ui, sans-serif';
+    ctx.fillStyle = 'rgba(60, 40, 25, 0.75)';
+    ctx.beginPath();
+    ctx.arc(64, 64, 56, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.font = '600 64px system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillStyle = 'rgba(60, 40, 25, 0.85)';
-    ctx.fillText(text.toUpperCase(), 128, 34);
+    ctx.fillStyle = '#f6ead9';
+    ctx.fillText(text, 64, 68);
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
     const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, depthWrite: false }));
@@ -342,17 +476,64 @@ export class Viewer {
     return sprite;
   }
 
-  private buildGrid(L: number, W: number, step: number): THREE.LineSegments {
+  /** Grille de 50 cm limitée à l'intérieur du sol. */
+  private buildGrid(plan: RoomPlan, step: number): THREE.LineSegments {
     const pts: number[] = [];
     const y = 0.2; // légèrement au-dessus du sol pour éviter le scintillement
-    for (let x = 0; x <= L + 0.001; x += step) pts.push(x, y, 0, x, y, W);
-    for (let z = 0; z <= W + 0.001; z += step) pts.push(0, y, z, L, y, z);
+    const { minX, maxX, minZ, maxZ } = plan.bbox;
+    for (let x = Math.ceil(minX / step) * step; x <= maxX; x += step) {
+      for (const [z0, z1] of insideSegments(plan.polygon, 'x', x + 1e-4)) pts.push(x, y, z0, x, y, z1);
+    }
+    for (let z = Math.ceil(minZ / step) * step; z <= maxZ; z += step) {
+      for (const [x0, x1] of insideSegments(plan.polygon, 'z', z + 1e-4)) pts.push(x0, y, z, x1, y, z);
+    }
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
     return new THREE.LineSegments(
       geom,
       new THREE.LineBasicMaterial({ color: COLORS.grid, transparent: true, opacity: 0.45 }),
     );
+  }
+
+  /** Distingue un toucher (clic bref, sans glisser) d'une rotation de caméra. */
+  private setupTap(): void {
+    const el = this.renderer.domElement;
+    let start: { x: number; y: number; time: number; id: number } | null = null;
+    el.addEventListener('pointerdown', (e) => {
+      start = e.isPrimary ? { x: e.clientX, y: e.clientY, time: performance.now(), id: e.pointerId } : null;
+    });
+    el.addEventListener('pointerup', (e) => {
+      if (!start || e.pointerId !== start.id) return;
+      const moved = Math.hypot(e.clientX - start.x, e.clientY - start.y);
+      const quick = performance.now() - start.time < 600;
+      start = null;
+      if (moved > 8 || !quick || this.tapListeners.size === 0) return;
+      const hit = this.pickWall(e.clientX, e.clientY);
+      this.tapListeners.forEach((l) => l(hit));
+    });
+  }
+
+  /** Mur visible (non estompé) sous le pointeur, avec la position touchée sur son parement intérieur. */
+  pickWall(clientX: number, clientY: number): WallHit | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(ndc, this.camera);
+    const candidates = this.walls.filter((w) => !w.faded);
+    const hits = this.raycaster.intersectObjects(candidates.map((w) => w.mesh), false);
+    for (const hit of hits) {
+      const view = candidates.find((w) => w.mesh === hit.object);
+      if (!view) continue;
+      const local = this.content.worldToLocal(hit.point.clone());
+      const g = view.geom;
+      const rel = { x: local.x - g.a.x, z: local.z - g.a.z };
+      // Seul le parement intérieur compte (pas le dessus ni les chants du mur).
+      if (dot(rel, g.out) > 1) continue;
+      return { wallId: g.wall.id, u: dot(rel, g.dir), y: local.y };
+    }
+    return null;
   }
 
   /** Estompe les murs situés entre la caméra et l'intérieur (vue « maison de poupée »). */
