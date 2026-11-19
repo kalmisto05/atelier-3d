@@ -16,7 +16,7 @@
  * et ajouter une étape dans `migrate.ts`.
  */
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export type Id = string;
 
@@ -33,9 +33,16 @@ export interface Project {
   createdAt: string; // ISO 8601
   updatedAt: string; // ISO 8601
   house: House;
+  settings: ProjectSettings;
   /** Sélection courante dans l'interface (persistée pour retrouver son contexte). */
   activeFloorId: Id;
   activeRoomId: Id;
+}
+
+/** Réglages propres à la personne qui conçoit (enregistrés avec le projet). */
+export interface ProjectSettings {
+  /** Hauteur des yeux pour la vue à la première personne. */
+  eyeHeight: number;
 }
 
 export interface House {

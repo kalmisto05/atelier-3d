@@ -540,3 +540,7 @@ body.visiting .viewport canvas {
     transition: none;
   }
 }
+
+.eye-field {
+  margin: 12px 0 0;
+}

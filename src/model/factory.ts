@@ -11,9 +11,11 @@ import {
 } from './types';
 
 export const DEFAULT_WALL_THICKNESS = 10;
+export const DEFAULT_EYE_HEIGHT = 175;
 
 /** Bornes de saisie (cm et degrés). */
 export const LIMITS = {
+  eyeHeight: { min: 50, max: 250 },
   roomHeight: { min: 150, max: 1000 },
   wallLength: { min: 1, max: 5000 },
   wallAngle: { min: 1, max: 359 },
@@ -63,6 +65,7 @@ export function createProject(name = 'Mon projet'): Project {
     createdAt: now,
     updatedAt: now,
     house: { id: newId(), name: 'Maison', floors: [floor] },
+    settings: { eyeHeight: DEFAULT_EYE_HEIGHT },
     activeFloorId: floor.id,
     activeRoomId: floor.rooms[0].id,
   };

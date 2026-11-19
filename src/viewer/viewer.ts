@@ -38,9 +38,8 @@ const OUTLET_DEPTH = 1.5;
 
 /** Visite à la première personne. */
 const VISIT = {
-  eyeHeight: 160,
-  /** Hauteur sous laquelle un obstacle bloque le passage (taille d'une personne). */
-  bodyHeight: 185,
+  /** Marge au-dessus des yeux : un obstacle plus bas que yeux + marge bloque le passage. */
+  headroom: 10,
   /** Distance minimale entre le visiteur et les murs ou obstacles. */
   radius: 25,
   walkSpeed: 150, // cm/s
@@ -156,6 +155,7 @@ export class Viewer {
   private joystick = { x: 0, y: 0 };
   private yaw = 0;
   private pitch = 0;
+  private eyeHeight = 175;
   private lastTick = performance.now();
 
   constructor(private container: HTMLElement) {
@@ -216,6 +216,8 @@ export class Viewer {
     if (changed) {
       this.clearRoom();
       this.buildRoom(room);
+      // En visite, on reste sur place mais à la bonne hauteur si le plafond a changé.
+      if (this.mode === 'visit') this.camera.position.y = this.eyeY();
     }
     if (options.reframe) this.frameRoom(room);
     this.requestRender();
@@ -613,17 +615,32 @@ export class Viewer {
     this.joystick = { x, y };
   }
 
-  /** Place le visiteur à l'endroit le plus dégagé de la pièce, à hauteur des yeux. */
-  enterVisit(): void {
+  /** Hauteur des yeux (cm) utilisée par la vue à la première personne. */
+  setEyeHeight(height: number): void {
+    if (height === this.eyeHeight) return;
+    this.eyeHeight = height;
+    if (this.mode === 'visit') {
+      this.camera.position.y = this.eyeY();
+      this.requestRender();
+    }
+  }
+
+  /** Hauteur réelle de la caméra : celle des yeux, sans traverser le plafond. */
+  private eyeY(): number {
+    return Math.min(this.eyeHeight, (this.room?.height ?? Infinity) - 5);
+  }
+
+  /**
+   * Vue à hauteur d'yeux : debout au centre de la pièce, regard horizontal tourné vers le mur 1.
+   * Si le centre n'est pas accessible (pièce en L, obstacle…), on prend l'endroit le plus dégagé.
+   */
+  eyeLevelView(): void {
     if (!this.plan || !this.room) return;
-    const start = this.findOpenSpot();
+    const center = this.areaCentroid();
+    const start = this.canStand(center) ? center : this.findOpenSpot();
     const c = this.content.position;
-    this.camera.position.set(start.x + c.x, Math.min(VISIT.eyeHeight, this.room.height - 10), start.z + c.z);
-    // Regard tourné vers le centre de la pièce (ou vers le mur 1 si on y est déjà).
-    const bb = this.plan.bbox;
-    const dx = (bb.minX + bb.maxX) / 2 - start.x;
-    const dz = (bb.minZ + bb.maxZ) / 2 - start.z;
-    this.yaw = Math.hypot(dx, dz) > 30 ? Math.atan2(-dx, -dz) : 0;
+    this.camera.position.set(start.x + c.x, this.eyeY(), start.z + c.z);
+    this.yaw = 0;
     this.pitch = 0;
     this.applyLook();
     this.controls.enabled = false;
@@ -701,6 +718,24 @@ export class Viewer {
     el.addEventListener('pointercancel', end);
   }
 
+  /** Centre de gravité de la surface au sol. */
+  private areaCentroid(): Pt {
+    const poly = this.plan!.polygon;
+    let a = 0;
+    let cx = 0;
+    let cz = 0;
+    for (let i = 0; i < poly.length; i++) {
+      const p = poly[i];
+      const q = poly[(i + 1) % poly.length];
+      const k = p.x * q.z - q.x * p.z;
+      a += k;
+      cx += (p.x + q.x) * k;
+      cz += (p.z + q.z) * k;
+    }
+    if (Math.abs(a) < 1e-6) return { x: poly[0].x, z: poly[0].z };
+    return { x: cx / (3 * a), z: cz / (3 * a) };
+  }
+
   /** Une position (dans le plan) est-elle accessible au visiteur ? */
   private canStand(p: Pt): boolean {
     if (!this.plan || !this.room) return true;
@@ -708,7 +743,7 @@ export class Viewer {
     const r = VISIT.radius;
     return !this.room.obstacles.some(
       (o) =>
-        o.bottom < VISIT.bodyHeight &&
+        o.bottom < this.eyeHeight + VISIT.headroom &&
         p.x > o.x - r &&
         p.x < o.x + o.width + r &&
         p.z > o.z - r &&

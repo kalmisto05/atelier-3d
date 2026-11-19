@@ -91,10 +91,10 @@ async function main() {
   const panel = new Panel(store, {
     onRecenter: () => viewer.frameRoom(getActiveRoom(store.project)),
     onTopView: () => viewer.frameTop(getActiveRoom(store.project)),
-    onVisit: () => {
+    onEyeView: () => {
       // Le focus quitte le bouton pour que les touches pilotent bien la visite.
       (document.activeElement as HTMLElement | null)?.blur();
-      viewer.enterVisit();
+      viewer.eyeLevelView();
     },
     onPlaceOutlet: () => setPlacing(!placing),
     onExport: () => exportProject(store.project),
@@ -127,11 +127,16 @@ async function main() {
   });
 
   store.subscribe((p, source) => {
-    viewer.setRoom(getActiveRoom(p), { reframe: source === 'load' });
+    viewer.setEyeHeight(p.settings.eyeHeight);
+    viewer.setRoom(getActiveRoom(p));
+    // Projet ouvert ou importé : on se place debout au centre de la pièce.
+    if (source === 'load') viewer.eyeLevelView();
     if (source === 'user') autosaver.schedule(p);
   });
 
-  viewer.setRoom(getActiveRoom(store.project), { reframe: true });
+  viewer.setEyeHeight(store.project.settings.eyeHeight);
+  viewer.setRoom(getActiveRoom(store.project));
+  viewer.eyeLevelView();
   panel.setStatus(restored ? 'Projet restauré' : 'Nouveau projet', 'ok');
   if (needsSave) autosaver.schedule(store.project);
 

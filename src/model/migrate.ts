@@ -1,5 +1,5 @@
 import { SCHEMA_VERSION, type Project } from './types';
-import { DEFAULT_WALL_THICKNESS, LIMITS, MIN_WALLS, newId, rectangleWalls } from './factory';
+import { DEFAULT_EYE_HEIGHT, DEFAULT_WALL_THICKNESS, LIMITS, MIN_WALLS, newId, rectangleWalls } from './factory';
 
 export class ProjectFormatError extends Error {}
 
@@ -53,6 +53,8 @@ const MIGRATIONS: Record<number, Migration> = {
     });
     return { ...data, schemaVersion: 2 };
   },
+  /** v2 → v3 : réglages du projet (hauteur des yeux). */
+  2: (data) => ({ ...data, settings: { eyeHeight: DEFAULT_EYE_HEIGHT }, schemaVersion: 3 }),
 };
 
 /** Garde les éléments valides d'une liste (les éléments illisibles sont écartés plutôt que de bloquer l'import). */
@@ -148,6 +150,11 @@ export function parseProject(input: unknown): Project {
 
   data.id ??= newId();
   data.name = typeof data.name === 'string' && data.name.trim() ? data.name : 'Projet importé';
+  const eye = data.settings?.eyeHeight;
+  data.settings = {
+    eyeHeight:
+      isFiniteNumber(eye) && eye >= LIMITS.eyeHeight.min && eye <= LIMITS.eyeHeight.max ? eye : DEFAULT_EYE_HEIGHT,
+  };
   data.house.id ??= newId();
   data.house.name ??= 'Maison';
   const now = new Date().toISOString();

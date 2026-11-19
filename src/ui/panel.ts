@@ -1,5 +1,5 @@
 import type { Project, Room } from '../model/types';
-import { LIMITS, getActiveRoom } from '../model/factory';
+import { LIMITS, clamp, getActiveRoom } from '../model/factory';
 import { computePlan } from '../model/geometry';
 import type { ProjectStore } from '../model/store';
 import { bindNumberFields, numberField } from './fields';
@@ -11,7 +11,7 @@ import { WallsSection } from './walls';
 export interface PanelActions {
   onRecenter(): void;
   onTopView(): void;
-  onVisit(): void;
+  onEyeView(): void;
   onExport(): void;
   onImport(): void;
   onNewProject(): void;
@@ -64,10 +64,17 @@ export class Panel {
       <section class="actions">
         <h2>Vue</h2>
         <div class="button-row">
-          <button type="button" data-action="recenter">Vue 3D</button>
+          <button type="button" data-action="eye" class="wide">Vue à hauteur d'yeux (ZQSD)</button>
+          <button type="button" data-action="recenter">Tourner autour</button>
           <button type="button" data-action="top">Vue de dessus</button>
-          <button type="button" data-action="visit" class="wide">Visite à pied (ZQSD)</button>
         </div>
+        <label class="field eye-field" for="eye-height">
+          <span>Hauteur des yeux</span>
+          <span class="input-unit">
+            <input id="eye-height" type="number" inputmode="decimal" step="any" />
+            <span class="unit">cm</span>
+          </span>
+        </label>
         <p class="hint">
           <span class="hint-mouse">Souris : clic gauche pour tourner, clic droit pour déplacer, molette pour zoomer.</span>
           <span class="hint-touch">Tactile : un doigt pour tourner, deux doigts pour zoomer et déplacer.</span>
@@ -91,7 +98,7 @@ export class Panel {
       new: actions.onNewProject,
       recenter: actions.onRecenter,
       top: actions.onTopView,
-      visit: actions.onVisit,
+      eye: actions.onEyeView,
     };
     this.el.querySelectorAll<HTMLButtonElement>('button[data-action]').forEach((btn) => {
       btn.addEventListener('click', () => handlers[btn.dataset.action!]());
@@ -106,6 +113,8 @@ export class Panel {
       set: (room, _id, _key, v) => (room.height = v),
       limits: () => LIMITS.roomHeight,
     });
+
+    this.bindEyeHeight();
 
     const sections = this.el.querySelector('.sections')!;
     this.outlets = new OutletsSection(store, actions.onPlaceOutlet);
@@ -130,6 +139,7 @@ export class Panel {
     const room = getActiveRoom(project);
     this.input('project-name').value = project.name;
     this.input('room-name').value = room.name;
+    this.input('eye-height').value = String(project.settings.eyeHeight);
     this.el.querySelector('.room-height')!.innerHTML = numberField('room', 'height', 'Hauteur sous plafond', room.height);
     this.updateSummary(room);
   }
@@ -142,6 +152,27 @@ export class Panel {
 
   private input(id: string): HTMLInputElement {
     return this.el.querySelector<HTMLInputElement>(`#${id}`)!;
+  }
+
+  /** Hauteur des yeux : réglage du projet (pas de la pièce), appliqué en direct. */
+  private bindEyeHeight(): void {
+    const input = this.input('eye-height');
+    const { min, max } = LIMITS.eyeHeight;
+    const parse = () => (input.value === '' ? NaN : Number(input.value.replace(',', '.')));
+    input.addEventListener('input', () => {
+      const v = parse();
+      const valid = Number.isFinite(v) && v >= min && v <= max;
+      input.classList.toggle('invalid', !valid);
+      if (valid) this.store.update((p) => (p.settings.eyeHeight = v));
+    });
+    input.addEventListener('change', () => {
+      const v = parse();
+      const current = this.store.project.settings.eyeHeight;
+      const fixed = Number.isFinite(v) ? clamp(Math.round(v * 10) / 10, min, max) : current;
+      input.value = String(fixed);
+      input.classList.remove('invalid');
+      if (fixed !== current) this.store.update((p) => (p.settings.eyeHeight = fixed));
+    });
   }
 
   private bindText(id: string, set: (p: Project, v: string) => void, get: (p: Project) => string): void {
