@@ -5,6 +5,7 @@ import {
   type Opening,
   type OpeningKind,
   type Outlet,
+  type ProfilePoint,
   type Project,
   type Room,
   type Wall,
@@ -31,7 +32,7 @@ export function newId(): string {
 }
 
 export function createWall(length: number, angle = 90, thickness = DEFAULT_WALL_THICKNESS, name = ''): Wall {
-  return { id: newId(), name, length, angle, thickness, openings: [], outlets: [] };
+  return { id: newId(), name, length, angle, thickness, profile: [], openings: [], outlets: [] };
 }
 
 /** Quatre murs d'équerre : longueur selon X, largeur selon Z. */
@@ -131,7 +132,55 @@ export function createOpening(kind: OpeningKind, room: Room, wall: Wall): Openin
   const width = Math.min(d.width, Math.max(OPENING_MIN_SIZE, wall.length - 20));
   const sill = kind === 'porte' ? 0 : Math.min(d.sill, Math.max(0, room.height - d.height - 20));
   const height = Math.min(d.height, room.height - sill - 10);
-  return { id: newId(), kind, offset: Math.round((wall.length - width) / 2), width, height, sill };
+  return { id: newId(), kind, offset: Math.round((wall.length - width) / 2), width, height, sill, recess: 0 };
+}
+
+/** Le renfoncement sous une fenêtre laisse au moins 1 cm de mur. */
+export function recessLimits(wall: Wall) {
+  return { min: 0, max: Math.max(0, wall.thickness - 1) };
+}
+
+// ---------- Haut des murs (sommets) ----------
+
+/**
+ * Sommets du haut d'un mur, triés par distance (ordre conservé pour deux sommets
+ * à la même distance, ce qui forme un ressaut vertical).
+ */
+export function sortedProfile(wall: Wall): ProfilePoint[] {
+  return wall.profile
+    .map((p, i) => ({ p, i }))
+    .sort((a, b) => a.p.u - b.p.u || a.i - b.i)
+    .map((x) => x.p);
+}
+
+/** Premier passage en mode « sommets » : un sommet à chaque bout, à la hauteur du plafond. */
+export function initProfile(room: Room, wall: Wall): void {
+  if (wall.profile.length) return;
+  wall.profile = [
+    { id: newId(), u: 0, h: room.height },
+    { id: newId(), u: wall.length, h: room.height },
+  ];
+}
+
+/** Ajoute un sommet (le profil est initialisé si besoin). */
+export function addProfilePoint(room: Room, wall: Wall, u: number, h: number): ProfilePoint {
+  initProfile(room, wall);
+  const point = {
+    id: newId(),
+    u: clamp(Math.round(u * 10) / 10, 0, wall.length),
+    h: clamp(Math.round(h * 10) / 10, 0, room.height),
+  };
+  wall.profile.push(point);
+  wall.profile = sortedProfile(wall);
+  return point;
+}
+
+export function findProfilePoint(room: Room, id: string): { wall: Wall; point: ProfilePoint } | null {
+  for (const wall of room.walls) {
+    const point = wall.profile.find((p) => p.id === id);
+    if (point) return { wall, point };
+  }
+  return null;
 }
 
 export function findOpening(room: Room, id: string): { wall: Wall; opening: Opening } | null {

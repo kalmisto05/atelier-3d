@@ -9,3 +9,7 @@ dev-dist
 # Documents personnels (relevés, croquis) : jamais publiés
 croquis*
 *.atelier3d.json
+/*.jpg
+/*.jpeg
+/*.png
+/*.heic

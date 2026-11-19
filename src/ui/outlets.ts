@@ -16,6 +16,7 @@ export class OutletsSection extends ListSection {
   ) {
     super(
       store,
+      'outlet',
       'Prises',
       'Touchez « Placer une prise », puis touchez un mur dans la vue 3D. Par défaut : 10 × 10 cm, bas à 18 cm du sol.',
       `<button type="button" data-place class="wide">+ Placer une prise</button>`,
@@ -73,6 +74,10 @@ export class OutletsSection extends ListSection {
       target.outlets.push(o);
     });
     this.card(id)?.querySelector('select')?.focus();
+  }
+
+  protected count(room: Room): number {
+    return room.walls.reduce((n, w) => n + w.outlets.length, 0);
   }
 
   protected signature(room: Room): string {

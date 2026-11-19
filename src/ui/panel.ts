@@ -7,6 +7,8 @@ import { ObstaclesSection } from './obstacles';
 import { OpeningsSection } from './openings';
 import { OutletsSection } from './outlets';
 import { WallsSection } from './walls';
+import type { ListSection } from './list-section';
+import type { Selection } from '../viewer/viewer';
 
 export interface PanelActions {
   onRecenter(): void;
@@ -16,6 +18,7 @@ export interface PanelActions {
   onImport(): void;
   onNewProject(): void;
   onPlaceOutlet(): void;
+  onPickPoint(): void;
 }
 
 const fmt = new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 2 });
@@ -23,6 +26,7 @@ const fmt = new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 2 });
 export class Panel {
   readonly el: HTMLElement;
   readonly outlets: OutletsSection;
+  private sections: ListSection[];
   private statusEl: HTMLElement;
   private summaryEl: HTMLElement;
 
@@ -118,15 +122,34 @@ export class Panel {
 
     const sections = this.el.querySelector('.sections')!;
     this.outlets = new OutletsSection(store, actions.onPlaceOutlet);
-    for (const s of [new WallsSection(store), new OpeningsSection(store), this.outlets, new ObstaclesSection(store)]) {
-      sections.appendChild(s.root);
-    }
+    this.sections = [
+      new WallsSection(store, actions.onPickPoint),
+      new OpeningsSection(store),
+      this.outlets,
+      new ObstaclesSection(store),
+    ];
+    for (const s of this.sections) sections.appendChild(s.root);
 
     store.subscribe((project, source) => {
       if (source === 'load') this.fill(project);
       this.updateSummary(getActiveRoom(project));
     });
     this.fill(store.project);
+  }
+
+  /**
+   * Élément cliqué dans la vue 3D : ouvre sa section, met sa fiche en évidence.
+   * Sous une fenêtre, le champ « Renfoncement dessous » est activé directement.
+   */
+  select(selection: Selection | null): void {
+    for (const s of this.sections) {
+      if (selection && s.kind === selection.kind) {
+        const focusKey = selection.kind === 'opening' && selection.zone === 'below' ? 'recess' : undefined;
+        s.select(selection.id, focusKey);
+      } else {
+        s.select(null);
+      }
+    }
   }
 
   setStatus(text: string, kind: 'ok' | 'pending' | 'error' = 'ok'): void {

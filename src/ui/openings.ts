@@ -9,20 +9,24 @@ import {
   leastBusyWall,
   openingLimits,
   openingOverflows,
+  recessLimits,
 } from '../model/factory';
 import type { ProjectStore } from '../model/store';
 import { numberField } from './fields';
 import { ListSection } from './list-section';
 
-type Key = 'offset' | 'width' | 'height' | 'sill';
+type Key = 'offset' | 'width' | 'height' | 'sill' | 'recess';
 
 /** Portes et fenêtres de la pièce active. */
 export class OpeningsSection extends ListSection {
   constructor(store: ProjectStore) {
     super(
       store,
+      'opening',
       'Portes et fenêtres',
-      "Position mesurée depuis le début du mur (son coin gauche, vu de l'intérieur de la pièce).",
+      `Position mesurée depuis le début du mur (son coin gauche, vu de l'intérieur de la pièce).
+       <b>Renfoncement dessous</b> : de combien le mur est repoussé sous la fenêtre, du sol jusqu'à l'allège
+       (cliquez sous une fenêtre dans la vue 3D pour y accéder directement).`,
       `<button type="button" data-add="porte">+ Porte</button>
        <button type="button" data-add="fenetre">+ Fenêtre</button>`,
     );
@@ -50,7 +54,8 @@ export class OpeningsSection extends ListSection {
       },
       limits: (room, id, key) => {
         const f = findOpening(room, id);
-        return f ? openingLimits(room, f.wall, f.opening)[key as Key] : undefined;
+        if (!f) return undefined;
+        return key === 'recess' ? recessLimits(f.wall) : openingLimits(room, f.wall, f.opening)[key as Exclude<Key, 'recess'>];
       },
     });
   }
@@ -83,6 +88,10 @@ export class OpeningsSection extends ListSection {
     this.card(id)?.querySelector('select')?.focus();
   }
 
+  protected count(room: Room): number {
+    return room.walls.reduce((n, w) => n + w.openings.length, 0);
+  }
+
   protected signature(room: Room): string {
     return room.walls.map((w) => w.id + ':' + w.openings.map((o) => o.id).join('+')).join(',');
   }
@@ -104,6 +113,7 @@ export class OpeningsSection extends ListSection {
           ${numberField(uid, 'width', 'Largeur', o.width)}
           ${numberField(uid, 'height', 'Hauteur', o.height)}
           ${o.kind === 'fenetre' ? numberField(uid, 'sill', 'Allège', o.sill) : ''}
+          ${o.kind === 'fenetre' ? numberField(uid, 'recess', 'Renfoncement dessous', o.recess) : ''}
           <p class="warning" hidden>Dépasse du mur : ajustez la position ou les dimensions.</p>
         </div>`;
       }),

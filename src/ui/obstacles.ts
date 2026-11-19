@@ -12,6 +12,7 @@ export class ObstaclesSection extends ListSection {
   constructor(store: ProjectStore) {
     super(
       store,
+      'obstacle',
       'Obstacles',
       `Blocs fixes (dessous d'escalier, poteau, coffrage…). X et Z se mesurent depuis le début du mur 1 :
        X le long du mur 1, Z vers l'intérieur de la pièce.`,
@@ -63,6 +64,10 @@ export class ObstaclesSection extends ListSection {
       room.obstacles.push(o);
     });
     this.reveal(id);
+  }
+
+  protected count(room: Room): number {
+    return room.obstacles.length;
   }
 
   protected signature(room: Room): string {

@@ -1,19 +1,36 @@
-import type { Room, Wall } from '../model/types';
-import { LIMITS, MIN_WALLS, findWall, getActiveRoom, newId } from '../model/factory';
-import { computePlan } from '../model/geometry';
+import type { ProfilePoint, Room, Wall } from '../model/types';
+import {
+  LIMITS,
+  MIN_WALLS,
+  findProfilePoint,
+  findWall,
+  getActiveRoom,
+  initProfile,
+  newId,
+  sortedProfile,
+} from '../model/factory';
+import { computePlan, topLine } from '../model/geometry';
 import type { ProjectStore } from '../model/store';
 import { escapeHtml, numberField } from './fields';
 import { ListSection } from './list-section';
 
 const fmt = new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 1 });
 
-/** Contour de la pièce, mur par mur. */
+type WallKey = 'length' | 'angle' | 'thickness';
+type PointKey = 'u' | 'h';
+
+/** Contour de la pièce, mur par mur, et haut de chaque mur (sommets). */
 export class WallsSection extends ListSection {
   private status: HTMLElement;
 
-  constructor(store: ProjectStore) {
+  constructor(
+    store: ProjectStore,
+    /** Demande à poser un sommet en touchant un mur dans la vue 3D. */
+    private onPickPoint: () => void,
+  ) {
     super(
       store,
+      'wall',
       'Murs',
       `Faites le tour de la pièce dans le sens des aiguilles d'une montre, vu de dessus.
        <b>Angle du coin</b> : angle intérieur avec le mur suivant —
@@ -29,21 +46,67 @@ export class WallsSection extends ListSection {
       const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-action]');
       const id = btn?.closest<HTMLElement>('[data-id]')?.dataset.id;
       if (!btn || !id) return;
-      if (btn.dataset.action === 'split') this.split(id);
-      if (btn.dataset.action === 'remove') this.remove(id);
+      const actions: Record<string, (id: string) => void> = {
+        split: (wallId) => this.split(wallId),
+        remove: (wallId) => this.remove(wallId),
+        'edit-profile': (wallId) => this.editWall(wallId, initProfileOf),
+        'reset-profile': (wallId) => this.editWall(wallId, (_r, w) => (w.profile = [])),
+        'add-point': (wallId) => this.editWall(wallId, addMiddlePoint),
+        'pick-point': () => this.onPickPoint(),
+        'remove-point': (pointId) =>
+          this.store.update((p) => {
+            const f = findProfilePoint(getActiveRoom(p), pointId);
+            if (f) f.wall.profile = f.wall.profile.filter((x) => x.id !== pointId);
+          }),
+      };
+      actions[btn.dataset.action!]?.(id);
+    });
+
+    // Distance d'un sommet validée : on retrie les sommets (l'ordre affiché suit la distance).
+    this.list.addEventListener('change', (e) => {
+      const input = e.target as HTMLInputElement;
+      if (input.dataset.key !== 'u') return;
+      const pointId = input.closest<HTMLElement>('[data-id]')?.dataset.id;
+      if (!pointId) return;
+      this.store.update((p) => {
+        const f = findProfilePoint(getActiveRoom(p), pointId);
+        if (f) f.wall.profile = sortedProfile(f.wall);
+      });
     });
 
     this.init({
       get: (room, id, key) => {
         const w = findWall(room, id);
-        return w ? (w[key as 'length' | 'angle' | 'thickness'] as number) : undefined;
+        if (w) return w[key as WallKey];
+        return findProfilePoint(room, id)?.point[key as PointKey];
       },
       set: (room, id, key, v) => {
         const w = findWall(room, id);
-        if (w) w[key as 'length' | 'angle' | 'thickness'] = v;
+        if (w) {
+          w[key as WallKey] = v;
+          return;
+        }
+        const f = findProfilePoint(room, id);
+        if (f) f.point[key as PointKey] = v;
       },
-      limits: (_room, _id, key) =>
-        ({ length: LIMITS.wallLength, angle: LIMITS.wallAngle, thickness: LIMITS.wallThickness })[key],
+      limits: (room, id, key) => {
+        if (findWall(room, id)) {
+          return ({ length: LIMITS.wallLength, angle: LIMITS.wallAngle, thickness: LIMITS.wallThickness } as const)[
+            key as WallKey
+          ];
+        }
+        const f = findProfilePoint(room, id);
+        if (!f) return undefined;
+        return key === 'u' ? { min: 0, max: f.wall.length } : { min: 0, max: room.height };
+      },
+    });
+  }
+
+  private editWall(id: string, fn: (room: Room, wall: Wall) => void): void {
+    this.store.update((p) => {
+      const room = getActiveRoom(p);
+      const w = findWall(room, id);
+      if (w) fn(room, w);
     });
   }
 
@@ -55,17 +118,28 @@ export class WallsSection extends ListSection {
       if (i < 0) return;
       const w = room.walls[i];
       const half = Math.round((w.length / 2) * 10) / 10;
+      // Le haut du mur est conservé : chaque moitié reçoit ses sommets, plus un sommet à la coupure.
+      const profile = sortedProfile(w);
+      const cutH = profile.length ? topLine(profile, room.height, half)(half) : room.height;
+      const firstProfile: ProfilePoint[] = profile.length
+        ? [...profile.filter((q) => q.u <= half), { id: newId(), u: half, h: cutH }]
+        : [];
+      const secondProfile: ProfilePoint[] = profile.length
+        ? [{ id: newId(), u: 0, h: cutH }, ...profile.filter((q) => q.u > half).map((q) => ({ ...q, u: q.u - half }))]
+        : [];
       const second: Wall = {
         id: newId(),
         name: '',
         length: Math.round((w.length - half) * 10) / 10,
         angle: w.angle,
         thickness: w.thickness,
+        profile: secondProfile,
         openings: w.openings.filter((o) => o.offset >= half).map((o) => ({ ...o, offset: o.offset - half })),
         outlets: w.outlets.filter((o) => o.offset >= half).map((o) => ({ ...o, offset: o.offset - half })),
       };
       w.openings = w.openings.filter((o) => o.offset < half);
       w.outlets = w.outlets.filter((o) => o.offset < half);
+      w.profile = firstProfile;
       w.length = half;
       w.angle = 180;
       room.walls.splice(i + 1, 0, second);
@@ -85,8 +159,12 @@ export class WallsSection extends ListSection {
     });
   }
 
+  protected count(room: Room): number {
+    return room.walls.length;
+  }
+
   protected signature(room: Room): string {
-    return room.walls.map((w) => w.id).join(',');
+    return room.walls.map((w) => w.id + ':' + w.profile.map((q) => q.id).join('+')).join(',');
   }
 
   protected renderItems(room: Room): string {
@@ -109,9 +187,41 @@ export class WallsSection extends ListSection {
             ${numberField(uid, 'angle', 'Angle du coin', w.angle, '°')}
             ${numberField(uid, 'thickness', 'Épaisseur', w.thickness)}
           </div>
+          ${this.profileHtml(w)}
         </div>`;
       })
       .join('');
+  }
+
+  private profileHtml(w: Wall): string {
+    if (!w.profile.length) {
+      return `
+        <div class="profile">
+          <span class="profile-title">Haut du mur : horizontal, au plafond</span>
+          <button type="button" class="small" data-action="edit-profile">Modifier</button>
+        </div>`;
+    }
+    const rows = w.profile
+      .map(
+        (q, k) => `
+        <div class="profile-row" data-id="${q.id}">
+          <span class="profile-index">${k + 1}</span>
+          ${numberField(`pt-${q.id}`, 'u', 'Distance', q.u)}
+          ${numberField(`pt-${q.id}`, 'h', 'Hauteur', q.h)}
+          <button type="button" class="small danger" data-action="remove-point" aria-label="Supprimer le sommet ${k + 1}">✕</button>
+        </div>`,
+      )
+      .join('');
+    return `
+      <div class="profile open">
+        <span class="profile-title">Haut du mur — sommets (distance depuis la gauche, hauteur)</span>
+        ${rows}
+        <div class="profile-actions">
+          <button type="button" class="small" data-action="pick-point">+ Toucher le mur</button>
+          <button type="button" class="small" data-action="add-point">+ Sommet</button>
+          <button type="button" class="small" data-action="reset-profile">Remettre à plat</button>
+        </div>
+      </div>`;
   }
 
   protected update(room: Room): void {
@@ -145,4 +255,23 @@ export class WallsSection extends ListSection {
     this.status.dataset.kind = kind;
     this.status.innerHTML = lines.map((l) => `<p>${l}</p>`).join('');
   }
+}
+
+function initProfileOf(room: Room, wall: Wall): void {
+  initProfile(room, wall);
+}
+
+/** Ajoute un sommet au milieu du plus grand intervalle, sur la ligne actuelle du haut du mur. */
+function addMiddlePoint(room: Room, wall: Wall): void {
+  initProfile(room, wall);
+  const pts = sortedProfile(wall);
+  let best = { u: wall.length / 2, gap: -1 };
+  for (let i = 0; i + 1 < pts.length; i++) {
+    const gap = pts[i + 1].u - pts[i].u;
+    if (gap > best.gap) best = { u: (pts[i].u + pts[i + 1].u) / 2, gap };
+  }
+  const u = Math.round(best.u * 10) / 10;
+  const h = Math.round(topLine(pts, room.height, u)(u) * 10) / 10;
+  wall.profile.push({ id: newId(), u, h });
+  wall.profile = sortedProfile(wall);
 }

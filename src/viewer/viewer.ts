@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import type { Room } from '../model/types';
+import type { Room, Wall } from '../model/types';
+import { sortedProfile } from '../model/factory';
 import {
   clipConvex,
   computePlan,
@@ -9,6 +10,7 @@ import {
   dot,
   insideSegments,
   pointInPolygon,
+  topLine,
   wallPoint,
   type Pt,
   type RoomPlan,
@@ -29,6 +31,7 @@ const COLORS = {
   outletEdge: 0x555049,
   obstacle: 0xb7a48d,
   obstacleEdge: 0x6b5a48,
+  selection: 0xff9a3c,
 };
 
 const FRAME_WIDTH = 5;
@@ -57,6 +60,22 @@ const MOVE_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown
 
 export type ViewMode = 'orbit' | 'visit';
 
+/** Élément désigné dans la vue 3D (clic) ou dans le panneau. */
+export type Selection =
+  | { kind: 'wall'; id: string }
+  | { kind: 'opening'; id: string; zone?: 'hole' | 'below' }
+  | { kind: 'outlet'; id: string }
+  | { kind: 'obstacle'; id: string };
+
+/** Résultat d'un clic dans la vue : l'élément touché et, sur un mur, la position touchée. */
+export interface Pick {
+  selection: Selection;
+  wallId?: string;
+  /** Position le long du mur depuis son début, et hauteur (cm). */
+  u?: number;
+  y?: number;
+}
+
 /** Matériau qui s'estompe quand son mur est entre la caméra et la pièce. */
 interface Fadeable {
   material: THREE.Material;
@@ -66,7 +85,8 @@ interface Fadeable {
 
 interface WallView {
   geom: WallGeom;
-  mesh: THREE.Mesh;
+  /** Maillages cliquables de ce mur (maçonnerie, menuiseries, prises). */
+  meshes: THREE.Mesh[];
   fadeables: Fadeable[];
   /** Normale sortante et point du parement extérieur, dans le repère de la scène. */
   normal: THREE.Vector3;
@@ -74,21 +94,17 @@ interface WallView {
   faded: boolean;
 }
 
-/** Point touché sur le parement intérieur d'un mur. */
-export interface WallHit {
-  wallId: string;
-  /** Position le long du mur depuis son début (cm). */
-  u: number;
-  /** Hauteur depuis le sol (cm). */
-  y: number;
-}
+/** Hauteur d'un sommet de polygone, fixe ou fonction de sa position. */
+type Height = number | ((p: Pt) => number);
 
 /**
- * Prisme droit : polygone convexe du plan extrudé entre les hauteurs y0 et y1.
- * Géométrie non indexée avec normales par face (rendu à facettes nettes).
+ * Prisme droit : polygone convexe du plan extrudé entre la hauteur y0 et le dessus y1
+ * (constant, ou variable s'il suit une pente). Géométrie non indexée, normales par face.
  */
-function prism(poly: Pt[], y0: number, y1: number): THREE.BufferGeometry | null {
-  if (poly.length < 3 || y1 - y0 < 0.01) return null;
+function prism(poly: Pt[], y0: number, y1: Height): THREE.BufferGeometry | null {
+  if (poly.length < 3) return null;
+  const top = (p: Pt) => Math.max(y0, typeof y1 === 'number' ? y1 : y1(p));
+  if (poly.every((p) => top(p) - y0 < 0.01)) return null;
   const pos: number[] = [];
   const nor: number[] = [];
   const c = poly.reduce((s, p) => ({ x: s.x + p.x / poly.length, z: s.z + p.z / poly.length }), { x: 0, z: 0 });
@@ -103,21 +119,22 @@ function prism(poly: Pt[], y0: number, y1: number): THREE.BufferGeometry | null 
       nor.push(n.x, n.y, n.z);
     }
   };
-  const v = (p: Pt, y: number) => new THREE.Vector3(p.x, y, p.z);
+  const lo = (p: Pt) => new THREE.Vector3(p.x, y0, p.z);
+  const hi = (p: Pt) => new THREE.Vector3(p.x, top(p), p.z);
   const up = new THREE.Vector3(0, 1, 0);
   const down = new THREE.Vector3(0, -1, 0);
   for (let i = 1; i + 1 < poly.length; i++) {
-    tri(v(poly[0], y1), v(poly[i], y1), v(poly[i + 1], y1), up);
-    tri(v(poly[0], y0), v(poly[i], y0), v(poly[i + 1], y0), down);
+    tri(hi(poly[0]), hi(poly[i]), hi(poly[i + 1]), up);
+    tri(lo(poly[0]), lo(poly[i]), lo(poly[i + 1]), down);
   }
   for (let i = 0; i < poly.length; i++) {
     const p = poly[i];
     const q = poly[(i + 1) % poly.length];
-    const mid = { x: (p.x + q.x) / 2 - c.x, z: (p.z + q.z) / 2 - c.z };
-    const out = new THREE.Vector3(mid.x, 0, mid.z);
-    tri(v(p, y0), v(q, y0), v(q, y1), out);
-    tri(v(p, y0), v(q, y1), v(p, y1), out);
+    const out = new THREE.Vector3((p.x + q.x) / 2 - c.x, 0, (p.z + q.z) / 2 - c.z);
+    tri(lo(p), lo(q), hi(q), out);
+    tri(lo(p), hi(q), hi(p), out);
   }
+  if (!pos.length) return null;
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
@@ -132,6 +149,12 @@ function merge(list: (THREE.BufferGeometry | null)[]): THREE.BufferGeometry | nu
   return merged;
 }
 
+function lineSegments(pts: number[], material: THREE.LineBasicMaterial): THREE.LineSegments {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+  return new THREE.LineSegments(g, material);
+}
+
 export class Viewer {
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
@@ -141,12 +164,15 @@ export class Viewer {
   private roomGroup = new THREE.Group();
   private content = new THREE.Group();
   private walls: WallView[] = [];
+  private obstacleMeshes: THREE.Mesh[] = [];
   private plan: RoomPlan | null = null;
   private needsRender = true;
   private lastRoomKey = '';
   private tmp = new THREE.Vector3();
   private raycaster = new THREE.Raycaster();
-  private tapListeners = new Set<(hit: WallHit | null) => void>();
+  private tapListeners = new Set<(pick: Pick | null) => void>();
+  private selection: Selection | null = null;
+  private selectionLines: THREE.LineSegments | null = null;
 
   private room: Room | null = null;
   private mode: ViewMode = 'orbit';
@@ -196,7 +222,7 @@ export class Viewer {
   }
 
   /** Abonnement aux « touchers » (clic ou tape sans glisser) sur la vue 3D. */
-  onTap(listener: (hit: WallHit | null) => void): () => void {
+  onTap(listener: (pick: Pick | null) => void): () => void {
     this.tapListeners.add(listener);
     return () => this.tapListeners.delete(listener);
   }
@@ -216,10 +242,18 @@ export class Viewer {
     if (changed) {
       this.clearRoom();
       this.buildRoom(room);
+      this.drawSelection();
       // En visite, on reste sur place mais à la bonne hauteur si le plafond a changé.
       if (this.mode === 'visit') this.camera.position.y = this.eyeY();
     }
     if (options.reframe) this.frameRoom(room);
+    this.requestRender();
+  }
+
+  /** Met un élément en évidence (contour orange), ou rien avec `null`. */
+  setSelection(selection: Selection | null): void {
+    this.selection = selection;
+    this.drawSelection();
     this.requestRender();
   }
 
@@ -265,6 +299,8 @@ export class Viewer {
     });
     this.roomGroup.clear();
     this.walls = [];
+    this.obstacleMeshes = [];
+    this.selectionLines = null;
   }
 
   private buildRoom(room: Room): void {
@@ -302,25 +338,45 @@ export class Viewer {
     }
 
     for (const o of room.obstacles) {
-      const poly = [
-        { x: o.x, z: o.z },
-        { x: o.x + o.width, z: o.z },
-        { x: o.x + o.width, z: o.z + o.depth },
-        { x: o.x, z: o.z + o.depth },
-      ];
       const top = Math.min(o.bottom + o.height, room.height);
-      const geom = prism(poly, o.bottom, top);
+      const geom = prism(this.obstacleRect(o), o.bottom, top);
       if (!geom) continue;
       const mesh = new THREE.Mesh(
         geom,
         new THREE.MeshStandardMaterial({ color: COLORS.obstacle, roughness: 0.9, transparent: true, opacity: 0.85 }),
       );
+      mesh.userData.obstacleId = o.id;
+      this.obstacleMeshes.push(mesh);
       const edges = new THREE.LineSegments(
         new THREE.EdgesGeometry(geom),
         new THREE.LineBasicMaterial({ color: COLORS.obstacleEdge }),
       );
       this.content.add(mesh, edges);
     }
+  }
+
+  private obstacleRect(o: Room['obstacles'][number]): Pt[] {
+    return [
+      { x: o.x, z: o.z },
+      { x: o.x + o.width, z: o.z },
+      { x: o.x + o.width, z: o.z + o.depth },
+      { x: o.x, z: o.z + o.depth },
+    ];
+  }
+
+  /** Ouvertures d'un mur rognées à ses limites (utile si la pièce a été modifiée après coup). */
+  private holes(room: Room, wall: Wall, len: number) {
+    return wall.openings
+      .map((o) => ({
+        id: o.id,
+        kind: o.kind,
+        recess: o.kind === 'fenetre' ? Math.min(o.recess, wall.thickness - 1) : 0,
+        u0: Math.max(0, o.offset),
+        u1: Math.min(len, o.offset + o.width),
+        y0: Math.max(0, o.sill),
+        y1: Math.min(room.height, o.sill + o.height),
+      }))
+      .filter((r) => r.u1 - r.u0 > 0.5 && r.y1 - r.y0 > 0.5);
   }
 
   private buildWall(room: Room, g: WallGeom): WallView {
@@ -330,46 +386,78 @@ export class Viewer {
     const len = g.length;
     const p = (u: number, d: number) => wallPoint(g, u, d);
     const uOf = (q: Pt) => dot({ x: q.x - g.a.x, z: q.z - g.a.z }, g.dir);
+    const dOf = (q: Pt) => dot({ x: q.x - g.a.x, z: q.z - g.a.z }, g.out);
     /** Tranche du mur entre u0 et u1 (bornes facultatives), en tenant compte des onglets aux coins. */
     const quad = [g.a, g.b, g.ob, g.oa];
-    const slice = (u0: number, u1: number) => {
+    const slice = (u0: number, u1: number, dMin = -Infinity) => {
       let poly = quad;
       if (Number.isFinite(u0)) poly = clipConvex(poly, (q) => uOf(q) - u0);
       if (Number.isFinite(u1)) poly = clipConvex(poly, (q) => u1 - uOf(q));
+      if (Number.isFinite(dMin)) poly = clipConvex(poly, (q) => dOf(q) - dMin);
       return poly;
     };
     const rect = (u0: number, u1: number, d0: number, d1: number) => [p(u0, d0), p(u1, d0), p(u1, d1), p(u0, d1)];
 
-    // Ouvertures rognées aux limites du mur (utile si la pièce a été modifiée après coup).
-    const holes = wall.openings
-      .map((o) => ({
-        kind: o.kind,
-        u0: Math.max(0, o.offset),
-        u1: Math.min(len, o.offset + o.width),
-        y0: Math.max(0, o.sill),
-        y1: Math.min(H, o.sill + o.height),
-      }))
-      .filter((r) => r.u1 - r.u0 > 0.5 && r.y1 - r.y0 > 0.5);
+    const holes = this.holes(room, wall, len);
+    const profile = sortedProfile(wall);
 
-    // Découpage en tranches verticales : dans chaque tranche, la maçonnerie est
-    // la hauteur totale moins la réunion des ouvertures qui la traversent.
-    const cuts = [-Infinity, ...[...new Set(holes.flatMap((h) => [h.u0, h.u1]))].sort((x, y) => x - y), Infinity];
+    // Découpage en tranches verticales aux bords des ouvertures, aux sommets du haut du mur
+    // et là où la pente du haut croise le haut ou le bas d'une ouverture : dans chaque tranche,
+    // le haut du mur est une seule droite et les ouvertures la traversent entièrement.
+    const cutSet = new Set<number>();
+    for (const h of holes) cutSet.add(h.u0).add(h.u1);
+    for (const q of profile) cutSet.add(q.u);
+    for (let i = 0; i + 1 < profile.length; i++) {
+      const a = profile[i];
+      const b = profile[i + 1];
+      if (b.u - a.u < 1e-6) continue;
+      for (const h of holes) {
+        for (const level of [h.y0, h.y1]) {
+          if ((a.h - level) * (b.h - level) < 0) cutSet.add(a.u + ((level - a.h) * (b.u - a.u)) / (b.h - a.h));
+        }
+      }
+    }
+    const cuts = [-Infinity, ...[...cutSet].sort((x, y) => x - y), Infinity];
+
     const solids: (THREE.BufferGeometry | null)[] = [];
+    const pts: number[] = [];
+    const seg = (a: Pt, ya: number, b: Pt, yb: number) => pts.push(a.x, ya, a.z, b.x, yb, b.z);
+    let prevTop: number | null = null;
     for (let i = 0; i < cuts.length - 1; i++) {
       const u0 = cuts[i];
       const u1 = cuts[i + 1];
       if (u1 - u0 < 0.01) continue;
+      const mid = Number.isFinite(u0) && Number.isFinite(u1) ? (u0 + u1) / 2 : Number.isFinite(u0) ? u0 + 1 : u1 - 1;
+      const topOf = topLine(profile, H, mid);
+      const top = (q: Pt) => topOf(uOf(q));
       const poly = slice(u0, u1);
-      const gaps = holes
-        .filter((h) => h.u0 <= u0 + 1e-6 && h.u1 >= u1 - 1e-6)
-        .map((h) => [h.y0, h.y1] as const)
-        .sort((x, y) => x[0] - y[0]);
+      const gaps = holes.filter((h) => h.u0 <= u0 + 1e-6 && h.u1 >= u1 - 1e-6).sort((x, y) => x.y0 - y.y0);
       let y = 0;
-      for (const [g0, g1] of gaps) {
-        if (g0 > y) solids.push(prism(poly, y, g0));
-        y = Math.max(y, g1);
+      for (const h of gaps) {
+        if (h.y0 > y) {
+          // Sous une fenêtre renfoncée, le parement intérieur est repoussé vers l'extérieur.
+          const below = h.recess > 0 && y === 0 ? slice(u0, u1, h.recess) : poly;
+          solids.push(prism(below, y, (q) => Math.min(h.y0, top(q))));
+        }
+        y = Math.max(y, h.y1);
       }
-      if (y < H) solids.push(prism(poly, y, H));
+      solids.push(prism(poly, y, top));
+
+      // Arêtes du haut du mur sur les deux faces, et ressauts verticaux entre tranches.
+      const ua = Number.isFinite(u0) ? u0 : uOf(g.a) < uOf(g.oa) ? uOf(g.a) : uOf(g.oa);
+      const ub = Number.isFinite(u1) ? u1 : uOf(g.b) > uOf(g.ob) ? uOf(g.b) : uOf(g.ob);
+      const tA = topOf(Math.max(0, Math.min(len, ua)));
+      const tB = topOf(Math.max(0, Math.min(len, ub)));
+      const uIn0 = Math.max(ua, 0);
+      const uIn1 = Math.min(ub, len);
+      if (uIn1 > uIn0 && (tA > 0 || tB > 0)) seg(p(uIn0, 0), topOf(uIn0), p(uIn1, 0), topOf(uIn1));
+      if (tA > 0 || tB > 0) seg(p(ua, t), tA, p(ub, t), tB);
+      if (prevTop !== null && Math.abs(prevTop - tA) > 0.01 && Number.isFinite(u0)) {
+        seg(p(u0, 0), prevTop, p(u0, 0), tA);
+        seg(p(u0, t), prevTop, p(u0, t), tA);
+        seg(p(u0, 0), Math.max(prevTop, tA), p(u0, t), Math.max(prevTop, tA));
+      }
+      prevTop = tB;
     }
 
     const fadeables: Fadeable[] = [];
@@ -378,25 +466,25 @@ export class Viewer {
       fadeables.push({ material, opacity: material.opacity, fadedOpacity });
       return material;
     };
+    const meshes: THREE.Mesh[] = [];
+    const addMesh = (geom: THREE.BufferGeometry | null, material: THREE.Material) => {
+      if (!geom) return;
+      const mesh = new THREE.Mesh(geom, material);
+      mesh.userData.wallId = wall.id;
+      meshes.push(mesh);
+      this.content.add(mesh);
+    };
 
-    const masonry = merge(solids) ?? new THREE.BufferGeometry();
-    const mesh = new THREE.Mesh(
-      masonry,
-      fade(new THREE.MeshStandardMaterial({ color: COLORS.wall, roughness: 0.95 }), 0.12),
-    );
-    mesh.userData.wallId = wall.id;
-    this.content.add(mesh);
+    addMesh(merge(solids), fade(new THREE.MeshStandardMaterial({ color: COLORS.wall, roughness: 0.95 }), 0.12));
 
-    // Arêtes : contour du mur, contour de chaque ouverture sur les deux faces et dans l'épaisseur.
-    const pts: number[] = [];
-    const seg = (a: Pt, ya: number, b: Pt, yb: number) => pts.push(a.x, ya, a.z, b.x, yb, b.z);
+    // Arêtes : bas du mur, bouts du mur, contour des ouvertures sur les deux faces et dans l'épaisseur.
+    const startTop = topLine(profile, H, 0)(0);
     seg(g.a, 0, g.b, 0);
-    seg(g.a, H, g.b, H);
     seg(g.oa, 0, g.ob, 0);
-    seg(g.oa, H, g.ob, H);
-    seg(g.b, H, g.ob, H);
-    seg(g.oa, H, g.a, H);
-    for (const c of [g.a, g.oa]) seg(c, 0, c, H);
+    if (startTop > 0) {
+      for (const c of [g.a, g.oa]) seg(c, 0, c, startTop);
+      seg(g.a, startTop, g.oa, startTop);
+    }
     for (const h of holes) {
       for (const d of [0, t]) {
         seg(p(h.u0, d), h.y0, p(h.u1, d), h.y0);
@@ -405,10 +493,18 @@ export class Viewer {
         seg(p(h.u0, d), h.y1, p(h.u0, d), h.y0);
       }
       for (const [u, y] of [[h.u0, h.y0], [h.u1, h.y0], [h.u0, h.y1], [h.u1, h.y1]]) seg(p(u, 0), y, p(u, t), y);
+      if (h.recess > 0 && h.y0 > 0) {
+        const r = h.recess;
+        seg(p(h.u0, 0), 0, p(h.u0, 0), h.y0);
+        seg(p(h.u1, 0), 0, p(h.u1, 0), h.y0);
+        seg(p(h.u0, r), 0, p(h.u1, r), 0);
+        seg(p(h.u0, r), 0, p(h.u0, r), h.y0);
+        seg(p(h.u1, r), 0, p(h.u1, r), h.y0);
+        seg(p(h.u0, 0), 0, p(h.u0, r), 0);
+        seg(p(h.u1, 0), 0, p(h.u1, r), 0);
+      }
     }
-    const edgeGeom = new THREE.BufferGeometry();
-    edgeGeom.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
-    this.content.add(new THREE.LineSegments(edgeGeom, fade(new THREE.LineBasicMaterial({ color: COLORS.wallEdge }), 0.35)));
+    this.content.add(lineSegments(pts, fade(new THREE.LineBasicMaterial({ color: COLORS.wallEdge }), 0.35)));
 
     // Menuiseries : cadre (sans traverse basse pour une porte) et vitre pour une fenêtre.
     // Dans un mur épais (embrasure), la fenêtre est posée près du parement extérieur.
@@ -430,20 +526,11 @@ export class Viewer {
         glasses.push(prism(rect(h.u0 + fw, h.u1 - fw, dm - 0.5, dm + 0.5), h.y0 + fw, h.y1 - fw));
       }
     }
-    const frameGeom = merge(frames);
-    if (frameGeom) {
-      this.content.add(
-        new THREE.Mesh(frameGeom, fade(new THREE.MeshStandardMaterial({ color: COLORS.frame, roughness: 0.7 }), 0.15)),
-      );
-    }
-    const glassGeom = merge(glasses);
-    if (glassGeom) {
-      const glassMat = fade(
-        new THREE.MeshStandardMaterial({ color: COLORS.glass, roughness: 0.1, opacity: 0.35, depthWrite: false }),
-        0.06,
-      );
-      this.content.add(new THREE.Mesh(glassGeom, glassMat));
-    }
+    addMesh(merge(frames), fade(new THREE.MeshStandardMaterial({ color: COLORS.frame, roughness: 0.7 }), 0.15));
+    addMesh(
+      merge(glasses),
+      fade(new THREE.MeshStandardMaterial({ color: COLORS.glass, roughness: 0.1, opacity: 0.35, depthWrite: false }), 0.06),
+    );
 
     // Prises : petits pavés en légère saillie sur le parement intérieur.
     const outletGeoms: (THREE.BufferGeometry | null)[] = [];
@@ -472,25 +559,89 @@ export class Viewer {
         outletLines.push(a.x, cy, a.z, b.x, cy, b.z);
       }
     }
-    const outletGeom = merge(outletGeoms);
-    if (outletGeom) {
-      this.content.add(
-        new THREE.Mesh(outletGeom, fade(new THREE.MeshStandardMaterial({ color: COLORS.outlet, roughness: 0.5 }), 0.2)),
-      );
-      const lg = new THREE.BufferGeometry();
-      lg.setAttribute('position', new THREE.Float32BufferAttribute(outletLines, 3));
-      this.content.add(new THREE.LineSegments(lg, fade(new THREE.LineBasicMaterial({ color: COLORS.outletEdge }), 0.3)));
+    if (outletGeoms.length) {
+      addMesh(merge(outletGeoms), fade(new THREE.MeshStandardMaterial({ color: COLORS.outlet, roughness: 0.5 }), 0.2));
+      this.content.add(lineSegments(outletLines, fade(new THREE.LineBasicMaterial({ color: COLORS.outletEdge }), 0.3)));
     }
 
     const mid = p(len / 2, t);
     return {
       geom: g,
-      mesh,
+      meshes,
       fadeables,
       normal: new THREE.Vector3(g.out.x, 0, g.out.z),
       outerPoint: new THREE.Vector3(mid.x, H / 2, mid.z),
       faded: false,
     };
+  }
+
+  /** Contour orange de l'élément sélectionné, visible à travers les murs. */
+  private drawSelection(): void {
+    if (this.selectionLines) {
+      this.selectionLines.removeFromParent();
+      this.selectionLines.geometry.dispose();
+      (this.selectionLines.material as THREE.Material).dispose();
+      this.selectionLines = null;
+    }
+    const sel = this.selection;
+    const room = this.room;
+    if (!sel || !room || !this.plan) return;
+    const pts: number[] = [];
+    const seg = (a: Pt, ya: number, b: Pt, yb: number) => pts.push(a.x, ya, a.z, b.x, yb, b.z);
+    const outline = (g: WallGeom, u0: number, u1: number, y0: number, y1: number, d: number) => {
+      const p = (u: number) => wallPoint(g, u, d);
+      seg(p(u0), y0, p(u1), y0);
+      seg(p(u1), y0, p(u1), y1);
+      seg(p(u1), y1, p(u0), y1);
+      seg(p(u0), y1, p(u0), y0);
+    };
+
+    if (sel.kind === 'obstacle') {
+      const o = room.obstacles.find((x) => x.id === sel.id);
+      if (o) {
+        const r = this.obstacleRect(o);
+        const y1 = Math.min(o.bottom + o.height, room.height);
+        for (let i = 0; i < 4; i++) {
+          const a = r[i];
+          const b = r[(i + 1) % 4];
+          seg(a, o.bottom, b, o.bottom);
+          seg(a, y1, b, y1);
+          seg(a, o.bottom, a, y1);
+        }
+      }
+    } else {
+      for (const g of this.plan.walls) {
+        const wall = g.wall;
+        if (sel.kind === 'wall' && wall.id === sel.id) {
+          // Parement intérieur du mur, en suivant son haut.
+          const profile = sortedProfile(wall);
+          const us = [0, ...profile.map((q) => q.u).filter((u) => u > 0 && u < g.length), g.length];
+          seg(wallPoint(g, 0, -0.5), 0, wallPoint(g, g.length, -0.5), 0);
+          for (let i = 0; i + 1 < us.length; i++) {
+            const f = topLine(profile, room.height, (us[i] + us[i + 1]) / 2);
+            seg(wallPoint(g, us[i], -0.5), f(us[i]), wallPoint(g, us[i + 1], -0.5), f(us[i + 1]));
+          }
+          seg(wallPoint(g, 0, -0.5), 0, wallPoint(g, 0, -0.5), topLine(profile, room.height, 0)(0));
+          seg(wallPoint(g, g.length, -0.5), 0, wallPoint(g, g.length, -0.5), topLine(profile, room.height, g.length)(g.length));
+        }
+        if (sel.kind === 'opening') {
+          const h = this.holes(room, wall, g.length).find((x) => x.id === sel.id);
+          if (h) {
+            if (sel.zone === 'below' && h.y0 > 0) outline(g, h.u0, h.u1, 0, h.y0, h.recess - 0.5);
+            else outline(g, h.u0, h.u1, h.y0, h.y1, -0.5);
+          }
+        }
+        if (sel.kind === 'outlet') {
+          const o = wall.outlets.find((x) => x.id === sel.id);
+          if (o) outline(g, o.offset - 1, o.offset + o.width + 1, o.bottom - 1, o.bottom + o.height + 1, -OUTLET_DEPTH - 0.5);
+        }
+      }
+    }
+    if (!pts.length) return;
+    const material = new THREE.LineBasicMaterial({ color: COLORS.selection, depthTest: false, transparent: true });
+    this.selectionLines = lineSegments(pts, material);
+    this.selectionLines.renderOrder = 10;
+    this.content.add(this.selectionLines);
   }
 
   private makeLabel(text: string): THREE.Sprite {
@@ -525,12 +676,7 @@ export class Viewer {
     for (let z = Math.ceil(minZ / step) * step; z <= maxZ; z += step) {
       for (const [x0, x1] of insideSegments(plan.polygon, 'z', z + 1e-4)) pts.push(x0, y, z, x1, y, z);
     }
-    const geom = new THREE.BufferGeometry();
-    geom.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
-    return new THREE.LineSegments(
-      geom,
-      new THREE.LineBasicMaterial({ color: COLORS.grid, transparent: true, opacity: 0.45 }),
-    );
+    return lineSegments(pts, new THREE.LineBasicMaterial({ color: COLORS.grid, transparent: true, opacity: 0.45 }));
   }
 
   /** Distingue un toucher (clic bref, sans glisser) d'une rotation de caméra. */
@@ -546,32 +692,49 @@ export class Viewer {
       const quick = performance.now() - start.time < 600;
       start = null;
       if (moved > 8 || !quick || this.tapListeners.size === 0) return;
-      const hit = this.pickWall(e.clientX, e.clientY);
-      this.tapListeners.forEach((l) => l(hit));
+      const pick = this.pick(e.clientX, e.clientY);
+      this.tapListeners.forEach((l) => l(pick));
     });
   }
 
-  /** Mur visible (non estompé) sous le pointeur, avec la position touchée sur son parement intérieur. */
-  pickWall(clientX: number, clientY: number): WallHit | null {
+  /** Élément visible sous le pointeur (les murs estompés sont ignorés : on clique à travers). */
+  pick(clientX: number, clientY: number): Pick | null {
     const rect = this.renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(
       ((clientX - rect.left) / rect.width) * 2 - 1,
       -((clientY - rect.top) / rect.height) * 2 + 1,
     );
     this.raycaster.setFromCamera(ndc, this.camera);
-    const candidates = this.walls.filter((w) => !w.faded);
-    const hits = this.raycaster.intersectObjects(candidates.map((w) => w.mesh), false);
-    for (const hit of hits) {
-      const view = candidates.find((w) => w.mesh === hit.object);
-      if (!view) continue;
-      const local = this.content.worldToLocal(hit.point.clone());
-      const g = view.geom;
-      const rel = { x: local.x - g.a.x, z: local.z - g.a.z };
-      // Seul le parement intérieur compte (pas le dessus ni les chants du mur).
-      if (dot(rel, g.out) > 1) continue;
-      return { wallId: g.wall.id, u: dot(rel, g.dir), y: local.y };
+    const visible = this.walls.filter((w) => !w.faded);
+    const targets = [...visible.flatMap((w) => w.meshes), ...this.obstacleMeshes];
+    const hit = this.raycaster.intersectObjects(targets, false)[0];
+    if (!hit) return null;
+
+    const obstacleId = hit.object.userData.obstacleId as string | undefined;
+    if (obstacleId) return { selection: { kind: 'obstacle', id: obstacleId } };
+
+    const view = visible.find((w) => w.meshes.includes(hit.object as THREE.Mesh));
+    if (!view || !this.room) return null;
+    const g = view.geom;
+    const local = this.content.worldToLocal(hit.point.clone());
+    const rel = { x: local.x - g.a.x, z: local.z - g.a.z };
+    const u = dot(rel, g.dir);
+    const y = local.y;
+    const d = dot(rel, g.out);
+    const wallId = g.wall.id;
+    const base = { wallId, u, y };
+
+    const outlet = g.wall.outlets.find(
+      (o) => d < 0.5 && u >= o.offset - 0.5 && u <= o.offset + o.width + 0.5 && y >= o.bottom - 0.5 && y <= o.bottom + o.height + 0.5,
+    );
+    if (outlet) return { ...base, selection: { kind: 'outlet', id: outlet.id } };
+
+    for (const h of this.holes(this.room, g.wall, g.length)) {
+      if (u < h.u0 - 0.5 || u > h.u1 + 0.5) continue;
+      if (y >= h.y0 - 0.5 && y <= h.y1 + 0.5) return { ...base, selection: { kind: 'opening', id: h.id, zone: 'hole' } };
+      if (h.kind === 'fenetre' && y < h.y0) return { ...base, selection: { kind: 'opening', id: h.id, zone: 'below' } };
     }
-    return null;
+    return { ...base, selection: { kind: 'wall', id: wallId } };
   }
 
   /** Estompe les murs situés entre la caméra et l'intérieur (vue « maison de poupée »). */
@@ -804,7 +967,7 @@ export class Viewer {
       { x: pos.x + dx, z: pos.z },
       { x: pos.x, z: pos.z + dz },
     ];
-    const next = candidates.find((p) => free || this.canStand(p));
+    const next = candidates.find((q) => free || this.canStand(q));
     if (!next) return;
     this.camera.position.x = next.x + c.x;
     this.camera.position.z = next.z + c.z;

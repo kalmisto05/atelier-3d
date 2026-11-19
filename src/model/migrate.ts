@@ -55,6 +55,8 @@ const MIGRATIONS: Record<number, Migration> = {
   },
   /** v2 → v3 : réglages du projet (hauteur des yeux). */
   2: (data) => ({ ...data, settings: { eyeHeight: DEFAULT_EYE_HEIGHT }, schemaVersion: 3 }),
+  /** v3 → v4 : sommets du haut des murs et renfoncement sous les ouvertures (valeurs par défaut à la validation). */
+  3: (data) => ({ ...data, schemaVersion: 4 }),
 };
 
 /** Garde les éléments valides d'une liste (les éléments illisibles sont écartés plutôt que de bloquer l'import). */
@@ -129,6 +131,8 @@ export function parseProject(input: unknown): Project {
             isFiniteNumber(o.offset) &&
             isFiniteNumber(o.sill),
         );
+        for (const o of w.openings) o.recess = isFiniteNumber(o.recess) && o.recess > 0 ? o.recess : 0;
+        w.profile = keepValid(w.profile, (p) => isFiniteNumber(p.u) && isFiniteNumber(p.h) && p.h >= 0);
         w.outlets = keepValid(
           w.outlets,
           (o) => isPositiveNumber(o.width) && isPositiveNumber(o.height) && isFiniteNumber(o.offset) && isFiniteNumber(o.bottom),

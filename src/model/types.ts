@@ -16,7 +16,7 @@
  * et ajouter une étape dans `migrate.ts`.
  */
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export type Id = string;
 
@@ -86,8 +86,23 @@ export interface Wall {
   angle: number;
   /** Épaisseur du mur (profondeur des embrasures de fenêtre comprise). */
   thickness: number;
+  /**
+   * Haut du mur décrit par des sommets (distance depuis le début du mur, hauteur).
+   * Entre deux sommets, le haut du mur est une ligne droite ; au-dessus, c'est vide.
+   * Deux sommets à la même distance forment un ressaut vertical. Hauteur 0 = pas de mur.
+   * Liste vide : haut du mur horizontal, à la hauteur du plafond.
+   */
+  profile: ProfilePoint[];
   openings: Opening[];
   outlets: Outlet[];
+}
+
+export interface ProfilePoint {
+  id: Id;
+  /** Distance depuis le début du mur. */
+  u: number;
+  /** Hauteur depuis le sol. */
+  h: number;
 }
 
 export type OpeningKind = 'porte' | 'fenetre';
@@ -101,6 +116,11 @@ export interface Opening {
   height: number;
   /** Hauteur d'allège (0 pour une porte). */
   sill: number;
+  /**
+   * Renfoncement sous l'ouverture : de combien le mur est repoussé vers l'extérieur
+   * entre le sol et l'allège, sur toute la largeur de l'ouverture (0 = pas de renfoncement).
+   */
+  recess: number;
 }
 
 /** Prise électrique (ou interrupteur) posée sur le parement intérieur d'un mur. */

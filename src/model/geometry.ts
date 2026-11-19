@@ -139,6 +139,27 @@ export function clipConvex(poly: Pt[], f: (p: Pt) => number): Pt[] {
   return res;
 }
 
+/**
+ * Haut du mur sur un intervalle sans sommet intérieur : renvoie la droite h(u) valable
+ * autour de `mid`. `points` doit être trié par distance ; liste vide = plafond.
+ */
+export function topLine(points: { u: number; h: number }[], ceiling: number, mid: number): (u: number) => number {
+  const clampH = (h: number) => Math.max(0, Math.min(ceiling, h));
+  if (!points.length) return () => ceiling;
+  const first = points[0];
+  const last = points[points.length - 1];
+  if (mid <= first.u) return () => clampH(first.h);
+  if (mid >= last.u) return () => clampH(last.h);
+  for (let i = 0; i + 1 < points.length; i++) {
+    const p = points[i];
+    const q = points[i + 1];
+    if (p.u <= mid && mid <= q.u && q.u > p.u) {
+      return (u) => clampH(p.h + ((q.h - p.h) * (u - p.u)) / (q.u - p.u));
+    }
+  }
+  return () => clampH(last.h);
+}
+
 /** Le point est-il à l'intérieur du polygone (règle pair-impair) ? */
 export function pointInPolygon(p: Pt, polygon: Pt[]): boolean {
   let inside = false;

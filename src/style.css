@@ -544,3 +544,80 @@ body.visiting .viewport canvas {
 .eye-field {
   margin: 12px 0 0;
 }
+
+/* ---------- Sélection et sommets ---------- */
+.item-card.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgb(224 154 85 / 0.45);
+}
+
+details.section > summary .count {
+  margin-left: auto;
+  min-width: 1.6em;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.08);
+  color: var(--muted);
+  font-size: 0.8rem;
+  text-align: center;
+}
+details.section > summary .count:empty {
+  display: none;
+}
+
+.profile {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--panel-border);
+}
+.profile.open {
+  display: block;
+}
+.profile-title {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.profile.open .profile-title {
+  margin-bottom: 6px;
+}
+.profile-row {
+  display: grid;
+  grid-template-columns: 1.4em 1fr 1fr auto;
+  align-items: end;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.profile-index {
+  align-self: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-align: center;
+}
+.profile-row .field {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.profile-row input[type='number'] {
+  min-height: 34px;
+  padding: 4px 26px 4px 6px;
+}
+.profile-row .unit {
+  right: 6px;
+  font-size: 0.75rem;
+}
+.profile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}

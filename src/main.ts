@@ -1,11 +1,12 @@
 import './style.css';
-import { createOutlet, createProject, findWall, getActiveRoom } from './model/factory';
+import { addProfilePoint, createOutlet, createProject, findWall, getActiveRoom } from './model/factory';
 import { parseProject } from './model/migrate';
 import { ProjectStore } from './model/store';
 import { SCHEMA_VERSION, type Project } from './model/types';
 import { createAutosaver, loadCurrentProject } from './storage/db';
 import { exportProject, pickProjectFile } from './storage/file';
 import { createJoystick } from './ui/joystick';
+import { ITEM_FOCUS_EVENT, type ItemFocusDetail } from './ui/list-section';
 import { Panel } from './ui/panel';
 import { Viewer } from './viewer/viewer';
 
@@ -24,12 +25,19 @@ async function loadInitialProject(): Promise<{ project: Project; restored: boole
   return { project: createProject(), restored: false, needsSave: true };
 }
 
+/** Mode « toucher un mur » : poser une prise ou un sommet du haut du mur. */
+type Placing = null | 'outlet' | 'vertex';
+const PLACING_TEXT: Record<Exclude<Placing, null>, string> = {
+  outlet: 'Touchez un mur pour y placer la prise',
+  vertex: 'Touchez un mur à l’endroit du nouveau sommet',
+};
+
 async function main() {
   const app = document.getElementById('app')!;
   app.innerHTML = `
     <main class="viewport" id="viewport" aria-label="Vue 3D de la pièce">
       <div class="banner" hidden role="status">
-        <span>Touchez un mur pour y placer la prise</span>
+        <span class="banner-text"></span>
         <button type="button" class="small">Annuler</button>
       </div>
       <div class="visit-help" hidden role="status">
@@ -60,33 +68,48 @@ async function main() {
     document.body.classList.toggle('visiting', visiting);
   });
 
-  // ---------- Placement d'une prise en touchant un mur ----------
+  // ---------- Toucher un mur pour poser une prise ou un sommet ----------
   const banner = viewport.querySelector<HTMLElement>('.banner')!;
-  let placing = false;
-  const setPlacing = (active: boolean) => {
-    placing = active;
-    banner.hidden = !active;
-    viewer.setCursor(active ? 'crosshair' : '');
-    panel.outlets.setPlacing(active);
+  let placing: Placing = null;
+  const setPlacing = (mode: Placing) => {
+    placing = mode;
+    banner.hidden = !mode;
+    if (mode) banner.querySelector('.banner-text')!.textContent = PLACING_TEXT[mode];
+    viewer.setCursor(mode ? 'crosshair' : '');
+    panel.outlets.setPlacing(mode === 'outlet');
   };
-  banner.querySelector('button')!.addEventListener('click', () => setPlacing(false));
-  viewer.onTap((hit) => {
-    if (!placing) return;
-    if (!hit) return; // touché à côté d'un mur : on reste en mode placement
-    let id = '';
-    store.update((p) => {
-      const wall = findWall(getActiveRoom(p), hit.wallId);
-      if (!wall) return;
-      const outlet = createOutlet(wall, hit.u);
-      id = outlet.id;
-      wall.outlets.push(outlet);
-    });
-    setPlacing(false);
-    if (id) panel.outlets.revealOutlet(id);
-  });
+  banner.querySelector('button')!.addEventListener('click', () => setPlacing(null));
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && placing) setPlacing(false);
+    if (e.key === 'Escape' && placing) setPlacing(null);
   });
+
+  viewer.onTap((pick) => {
+    if (placing) {
+      if (!pick?.wallId || pick.u === undefined || pick.y === undefined) return; // à côté d'un mur : on reste en mode
+      const { wallId, u, y } = pick;
+      const mode = placing;
+      store.update((p) => {
+        const room = getActiveRoom(p);
+        const wall = findWall(room, wallId);
+        if (!wall) return;
+        if (mode === 'outlet') wall.outlets.push(createOutlet(wall, u));
+        else addProfilePoint(room, wall, u, y);
+      });
+      setPlacing(null);
+      const created = findWall(getActiveRoom(store.project), wallId);
+      const outlet = mode === 'outlet' ? created?.outlets[created.outlets.length - 1] : undefined;
+      select(outlet ? { kind: 'outlet', id: outlet.id } : { kind: 'wall', id: wallId });
+      return;
+    }
+    select(pick?.selection ?? null);
+  });
+
+  /** Sélection : contour en 3D, fiche ouverte dans le panneau (et tiroir ouvert sur téléphone). */
+  const select = (selection: Parameters<Viewer['setSelection']>[0]) => {
+    viewer.setSelection(selection);
+    panel.select(selection);
+    if (selection && isDrawer()) setDrawerOpen(true);
+  };
 
   const panel = new Panel(store, {
     onRecenter: () => viewer.frameRoom(getActiveRoom(store.project)),
@@ -96,7 +119,12 @@ async function main() {
       (document.activeElement as HTMLElement | null)?.blur();
       viewer.eyeLevelView();
     },
-    onPlaceOutlet: () => setPlacing(!placing),
+    onPlaceOutlet: () => setPlacing(placing === 'outlet' ? null : 'outlet'),
+    onPickPoint: () => {
+      setPlacing('vertex');
+      // Sur téléphone, on referme le tiroir pour dégager la vue.
+      if (isDrawer()) setDrawerOpen(false);
+    },
     onExport: () => exportProject(store.project),
     onImport: async () => {
       try {
@@ -117,6 +145,12 @@ async function main() {
   });
   app.appendChild(panel.el);
 
+  // Travail dans une fiche du panneau : l'élément correspondant est entouré dans la vue 3D.
+  panel.el.addEventListener(ITEM_FOCUS_EVENT, (e) => {
+    const { kind, id } = (e as CustomEvent<ItemFocusDetail>).detail;
+    viewer.setSelection({ kind, id });
+  });
+
   const autosaver = createAutosaver(400, (status, err) => {
     if (status === 'pending') panel.setStatus('Enregistrement…', 'pending');
     else if (status === 'saved') panel.setStatus('Enregistré', 'ok');
@@ -130,7 +164,10 @@ async function main() {
     viewer.setEyeHeight(p.settings.eyeHeight);
     viewer.setRoom(getActiveRoom(p));
     // Projet ouvert ou importé : on se place debout au centre de la pièce.
-    if (source === 'load') viewer.eyeLevelView();
+    if (source === 'load') {
+      select(null);
+      viewer.eyeLevelView();
+    }
     if (source === 'user') autosaver.schedule(p);
   });
 
@@ -149,11 +186,16 @@ async function main() {
   // Demande au navigateur de ne pas purger les données locales (utile sur Android).
   void navigator.storage?.persist?.();
 
-  setupPanelToggle(panel.el, app.querySelector<HTMLButtonElement>('.panel-toggle')!);
+  const setDrawerOpen = setupPanelToggle(panel.el, app.querySelector<HTMLButtonElement>('.panel-toggle')!);
+}
+
+/** Le panneau est-il un tiroir (petit écran) plutôt qu'une colonne ? */
+function isDrawer(): boolean {
+  return matchMedia('(max-width: 720px)').matches;
 }
 
 /** Sur petit écran, le panneau devient un tiroir en bas de l'écran. */
-function setupPanelToggle(panelEl: HTMLElement, toggle: HTMLButtonElement) {
+function setupPanelToggle(panelEl: HTMLElement, toggle: HTMLButtonElement): (open: boolean) => void {
   const setOpen = (open: boolean) => {
     // La classe sur <body> réduit la vue 3D au-dessus du tiroir pour garder la pièce visible.
     document.body.classList.toggle('panel-open', open);
@@ -162,6 +204,7 @@ function setupPanelToggle(panelEl: HTMLElement, toggle: HTMLButtonElement) {
   };
   toggle.addEventListener('click', () => setOpen(!document.body.classList.contains('panel-open')));
   panelEl.querySelector('.panel-handle')?.addEventListener('click', () => setOpen(false));
+  return setOpen;
 }
 
 void main();
