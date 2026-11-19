@@ -2,6 +2,9 @@ import { defineConfig } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig({
+  // Chemins relatifs : l'appli fonctionne à la racine d'un domaine comme dans un sous-dossier
+  // (ex. https://pseudo.github.io/atelier-3d/).
+  base: './',
   build: {
     // Three.js représente l'essentiel du bundle (~570 Ko) : taille attendue.
     chunkSizeWarningLimit: 800,
@@ -9,7 +12,10 @@ export default defineConfig({
   plugins: [
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['favicon.svg'],
+      // Le plugin ajoute de lui-même les icônes et le manifeste au cache : on ne les
+      // remet pas dans globPatterns, sinon le cache reçoit des doublons et le service
+      // worker refuse de s'installer (« Entry already exists »).
+      includeManifestIcons: true,
       manifest: {
         name: 'Atelier 3D — Meubles en bois massif',
         short_name: 'Atelier 3D',
@@ -28,7 +34,7 @@ export default defineConfig({
         ],
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,svg,png,webmanifest}'],
+        globPatterns: ['**/*.{js,css,html}', 'favicon.svg'],
       },
     }),
   ],
