@@ -71,7 +71,17 @@ export function parseProject(input: unknown): Project {
         const w = walls.find((x: any) => isObject(x) && x.side === side);
         if (!w) return createWall(side);
         w.thickness = isPositiveNumber(w.thickness) ? w.thickness : createWall(side).thickness;
-        w.openings = Array.isArray(w.openings) ? w.openings : [];
+        // Les ouvertures illisibles sont écartées plutôt que de bloquer tout l'import.
+        w.openings = (Array.isArray(w.openings) ? w.openings : []).filter(
+          (o: any) =>
+            isObject(o) &&
+            (o.kind === 'porte' || o.kind === 'fenetre') &&
+            isPositiveNumber(o.width) &&
+            isPositiveNumber(o.height) &&
+            Number.isFinite(o.offset) &&
+            Number.isFinite(o.sill),
+        );
+        for (const o of w.openings) o.id ??= newId();
         return w;
       });
     }

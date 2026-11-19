@@ -1,6 +1,7 @@
 import type { Project, Room } from '../model/types';
 import { ROOM_LIMITS, clamp, getActiveRoom } from '../model/factory';
 import type { ProjectStore } from '../model/store';
+import { OpeningsSection } from './openings';
 
 export interface PanelActions {
   onRecenter(): void;
@@ -69,6 +70,8 @@ export class Panel {
         <p class="summary"></p>
       </section>
 
+      <section class="openings-section"></section>
+
       <section class="actions">
         <h2>Fichier</h2>
         <button type="button" data-action="export">Exporter (JSON)</button>
@@ -88,6 +91,7 @@ export class Panel {
 
     this.statusEl = this.el.querySelector('.status')!;
     this.summaryEl = this.el.querySelector('.summary')!;
+    new OpeningsSection(store, this.el.querySelector('.openings-section')!);
 
     const handlers: Record<string, () => void> = {
       export: actions.onExport,

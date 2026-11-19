@@ -1,6 +1,8 @@
 import {
   SCHEMA_VERSION,
   type Floor,
+  type Opening,
+  type OpeningKind,
   type Project,
   type Room,
   type Wall,
@@ -66,6 +68,68 @@ export function getActiveRoom(project: Project): Room {
   const floor =
     project.house.floors.find((f) => f.id === project.activeFloorId) ?? project.house.floors[0];
   return floor.rooms.find((r) => r.id === project.activeRoomId) ?? floor.rooms[0];
+}
+
+export const WALL_LABELS: Record<WallSide, string> = {
+  nord: 'Nord',
+  est: 'Est',
+  sud: 'Sud',
+  ouest: 'Ouest',
+};
+
+/** Longueur intérieure d'un mur (cm). */
+export function wallLength(room: Room, side: WallSide): number {
+  return side === 'nord' || side === 'sud' ? room.length : room.width;
+}
+
+export const OPENING_LABELS: Record<OpeningKind, string> = { porte: 'Porte', fenetre: 'Fenêtre' };
+
+/** Dimensions standard (cm) : porte de 83 × 204, fenêtre de 100 × 115 avec allège de 95. */
+export const OPENING_DEFAULTS: Record<OpeningKind, { width: number; height: number; sill: number }> = {
+  porte: { width: 83, height: 204, sill: 0 },
+  fenetre: { width: 100, height: 115, sill: 95 },
+};
+
+export const OPENING_MIN_SIZE = 20;
+
+/** Bornes admissibles pour chaque grandeur d'une ouverture, compte tenu du mur et des autres valeurs. */
+export function openingLimits(room: Room, side: WallSide, o: Opening) {
+  const len = wallLength(room, side);
+  const H = room.height;
+  return {
+    offset: { min: 0, max: Math.max(0, len - o.width) },
+    width: { min: OPENING_MIN_SIZE, max: len - o.offset },
+    height: { min: OPENING_MIN_SIZE, max: H - o.sill },
+    sill: { min: 0, max: Math.max(0, H - o.height) },
+  };
+}
+
+/** Une ouverture dépasse-t-elle de son mur (après réduction de la pièce, par exemple) ? */
+export function openingOverflows(room: Room, side: WallSide, o: Opening): boolean {
+  return o.offset + o.width > wallLength(room, side) + 0.01 || o.sill + o.height > room.height + 0.01;
+}
+
+/** Crée une ouverture centrée sur le mur, ajustée si le mur est trop petit. */
+export function createOpening(kind: OpeningKind, room: Room, side: WallSide): Opening {
+  const d = OPENING_DEFAULTS[kind];
+  const len = wallLength(room, side);
+  const width = Math.min(d.width, Math.max(OPENING_MIN_SIZE, len - 20));
+  const sill = kind === 'porte' ? 0 : Math.min(d.sill, Math.max(0, room.height - d.height - 20));
+  const height = Math.min(d.height, room.height - sill - 10);
+  return { id: newId(), kind, offset: Math.round((len - width) / 2), width, height, sill };
+}
+
+/** Mur le moins chargé, pour placer une nouvelle ouverture sans chevauchement. */
+export function leastBusyWall(room: Room): WallSide {
+  return [...room.walls].sort((a, b) => a.openings.length - b.openings.length)[0].side;
+}
+
+export function findOpening(room: Room, id: string): { wall: Wall; opening: Opening } | null {
+  for (const wall of room.walls) {
+    const opening = wall.openings.find((o) => o.id === id);
+    if (opening) return { wall, opening };
+  }
+  return null;
 }
 
 export function clamp(value: number, min: number, max: number): number {

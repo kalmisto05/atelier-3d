@@ -202,6 +202,66 @@ button.danger {
   color: var(--danger);
 }
 
+/* ---------- Ouvertures ---------- */
+select {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  font: inherit;
+  color: var(--text);
+  background: var(--input-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+}
+
+.openings-section .hint {
+  margin: 0 0 10px;
+}
+
+.opening-card {
+  padding: 10px 10px 2px;
+  margin-bottom: 10px;
+  border: 1px solid var(--panel-border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: rgb(0 0 0 / 0.12);
+}
+.opening-card[data-kind='fenetre'] {
+  border-left-color: #7fb0d0;
+}
+
+.opening-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+button.small {
+  min-height: 34px;
+  padding: 4px 10px;
+  font-size: 0.85rem;
+}
+
+.button-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.warning {
+  margin: 0 0 8px;
+  font-size: 0.85rem;
+  color: var(--danger);
+}
+
+.empty {
+  margin: 0 0 10px;
+  font-size: 0.9rem;
+  color: var(--muted);
+  font-style: italic;
+}
+
 .hint-touch {
   display: none;
 }
