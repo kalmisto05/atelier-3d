@@ -11,6 +11,7 @@ import { WallsSection } from './walls';
 export interface PanelActions {
   onRecenter(): void;
   onTopView(): void;
+  onVisit(): void;
   onExport(): void;
   onImport(): void;
   onNewProject(): void;
@@ -65,6 +66,7 @@ export class Panel {
         <div class="button-row">
           <button type="button" data-action="recenter">Vue 3D</button>
           <button type="button" data-action="top">Vue de dessus</button>
+          <button type="button" data-action="visit" class="wide">Visite à pied (ZQSD)</button>
         </div>
         <p class="hint">
           <span class="hint-mouse">Souris : clic gauche pour tourner, clic droit pour déplacer, molette pour zoomer.</span>
@@ -89,6 +91,7 @@ export class Panel {
       new: actions.onNewProject,
       recenter: actions.onRecenter,
       top: actions.onTopView,
+      visit: actions.onVisit,
     };
     this.el.querySelectorAll<HTMLButtonElement>('button[data-action]').forEach((btn) => {
       btn.addEventListener('click', () => handlers[btn.dataset.action!]());

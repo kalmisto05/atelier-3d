@@ -5,8 +5,10 @@ import type { Room } from '../model/types';
 import {
   clipConvex,
   computePlan,
+  distanceToEdges,
   dot,
   insideSegments,
+  pointInPolygon,
   wallPoint,
   type Pt,
   type RoomPlan,
@@ -33,6 +35,28 @@ const FRAME_WIDTH = 5;
 const FRAME_DEPTH = 6;
 /** Saillie des prises par rapport au mur. */
 const OUTLET_DEPTH = 1.5;
+
+/** Visite à la première personne. */
+const VISIT = {
+  eyeHeight: 160,
+  /** Hauteur sous laquelle un obstacle bloque le passage (taille d'une personne). */
+  bodyHeight: 185,
+  /** Distance minimale entre le visiteur et les murs ou obstacles. */
+  radius: 25,
+  walkSpeed: 150, // cm/s
+  runSpeed: 320,
+  turnSpeed: 1.8, // rad/s (flèches gauche/droite)
+  lookSensitivity: 0.004, // rad par pixel
+  fov: 70,
+};
+
+/**
+ * Touches de déplacement, par position physique (`KeyboardEvent.code`) :
+ * ZQSD sur un clavier AZERTY correspond à WASD sur un clavier QWERTY.
+ */
+const MOVE_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ShiftLeft', 'ShiftRight']);
+
+export type ViewMode = 'orbit' | 'visit';
 
 /** Matériau qui s'estompe quand son mur est entre la caméra et la pièce. */
 interface Fadeable {
@@ -125,6 +149,15 @@ export class Viewer {
   private raycaster = new THREE.Raycaster();
   private tapListeners = new Set<(hit: WallHit | null) => void>();
 
+  private room: Room | null = null;
+  private mode: ViewMode = 'orbit';
+  private modeListeners = new Set<(mode: ViewMode) => void>();
+  private keys = new Set<string>();
+  private joystick = { x: 0, y: 0 };
+  private yaw = 0;
+  private pitch = 0;
+  private lastTick = performance.now();
+
   constructor(private container: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -152,6 +185,7 @@ export class Viewer {
     this.controls.addEventListener('change', () => this.requestRender());
 
     this.setupTap();
+    this.setupVisitInput();
     new ResizeObserver(() => this.resize()).observe(container);
     this.resize();
     this.renderer.setAnimationLoop(() => this.tick());
@@ -173,6 +207,7 @@ export class Viewer {
 
   /** Reconstruit la géométrie de la pièce si elle a changé. Recadre la caméra sur demande. */
   setRoom(room: Room, options: { reframe?: boolean } = {}): void {
+    this.room = room;
     const key = JSON.stringify(room);
     const changed = key !== this.lastRoomKey;
     this.lastRoomKey = key;
@@ -197,6 +232,7 @@ export class Viewer {
   }
 
   private frame(room: Room, direction: THREE.Vector3): void {
+    this.leaveVisit();
     const plan = this.plan ?? computePlan(room);
     const sx = plan.bbox.maxX - plan.bbox.minX;
     const sz = plan.bbox.maxZ - plan.bbox.minZ;
@@ -539,7 +575,9 @@ export class Viewer {
   /** Estompe les murs situés entre la caméra et l'intérieur (vue « maison de poupée »). */
   private updateWallVisibility(): void {
     for (const w of this.walls) {
-      const faded = this.tmp.copy(this.camera.position).sub(w.outerPoint).dot(w.normal) > 0;
+      // En visite, tous les murs restent pleins : on est dans la pièce.
+      const faded =
+        this.mode === 'orbit' && this.tmp.copy(this.camera.position).sub(w.outerPoint).dot(w.normal) > 0;
       if (faded === w.faded) continue;
       w.faded = faded;
       for (const f of w.fadeables) {
@@ -559,9 +597,193 @@ export class Viewer {
     this.requestRender();
   }
 
+  // ---------- Visite à la première personne ----------
+
+  get viewMode(): ViewMode {
+    return this.mode;
+  }
+
+  onModeChange(listener: (mode: ViewMode) => void): () => void {
+    this.modeListeners.add(listener);
+    return () => this.modeListeners.delete(listener);
+  }
+
+  /** Commande du joystick tactile : x vers la droite, y vers le bas, entre −1 et 1. */
+  setJoystick(x: number, y: number): void {
+    this.joystick = { x, y };
+  }
+
+  /** Place le visiteur à l'endroit le plus dégagé de la pièce, à hauteur des yeux. */
+  enterVisit(): void {
+    if (!this.plan || !this.room) return;
+    const start = this.findOpenSpot();
+    const c = this.content.position;
+    this.camera.position.set(start.x + c.x, Math.min(VISIT.eyeHeight, this.room.height - 10), start.z + c.z);
+    // Regard tourné vers le centre de la pièce (ou vers le mur 1 si on y est déjà).
+    const bb = this.plan.bbox;
+    const dx = (bb.minX + bb.maxX) / 2 - start.x;
+    const dz = (bb.minZ + bb.maxZ) / 2 - start.z;
+    this.yaw = Math.hypot(dx, dz) > 30 ? Math.atan2(-dx, -dz) : 0;
+    this.pitch = 0;
+    this.applyLook();
+    this.controls.enabled = false;
+    this.camera.fov = VISIT.fov;
+    this.camera.updateProjectionMatrix();
+    this.setMode('visit');
+  }
+
+  /** Revient à la vue orbitale cadrée sur la pièce. */
+  exitVisit(): void {
+    if (this.mode !== 'visit') return;
+    if (this.room) this.frameRoom(this.room);
+    else this.leaveVisit();
+  }
+
+  private leaveVisit(): void {
+    if (this.mode !== 'visit') return;
+    this.keys.clear();
+    this.joystick = { x: 0, y: 0 };
+    this.controls.enabled = true;
+    this.camera.fov = 50;
+    this.camera.updateProjectionMatrix();
+    this.setMode('orbit');
+  }
+
+  private setMode(mode: ViewMode): void {
+    this.mode = mode;
+    this.requestRender();
+    this.modeListeners.forEach((l) => l(mode));
+  }
+
+  private applyLook(): void {
+    this.camera.rotation.set(this.pitch, this.yaw, 0, 'YXZ');
+    this.requestRender();
+  }
+
+  private setupVisitInput(): void {
+    const isTyping = (e: KeyboardEvent) =>
+      e.target instanceof HTMLElement && e.target.closest('input, select, textarea, [contenteditable]') !== null;
+    window.addEventListener('keydown', (e) => {
+      if (this.mode !== 'visit' || isTyping(e)) return;
+      if (e.code === 'Escape') {
+        this.exitVisit();
+        return;
+      }
+      if (!MOVE_KEYS.has(e.code)) return;
+      e.preventDefault(); // pas de défilement de la page avec les flèches
+      this.keys.add(e.code);
+    });
+    window.addEventListener('keyup', (e) => this.keys.delete(e.code));
+    // Fenêtre quittée : on évite les touches « coincées ».
+    window.addEventListener('blur', () => this.keys.clear());
+
+    // Regarder autour de soi en glissant (souris ou doigt).
+    const el = this.renderer.domElement;
+    let drag: { id: number; x: number; y: number } | null = null;
+    el.addEventListener('pointerdown', (e) => {
+      if (this.mode !== 'visit' || drag) return;
+      drag = { id: e.pointerId, x: e.clientX, y: e.clientY };
+      el.setPointerCapture(e.pointerId);
+    });
+    el.addEventListener('pointermove', (e) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      this.yaw -= (e.clientX - drag.x) * VISIT.lookSensitivity;
+      this.pitch -= (e.clientY - drag.y) * VISIT.lookSensitivity;
+      this.pitch = THREE.MathUtils.clamp(this.pitch, -1.45, 1.45);
+      drag.x = e.clientX;
+      drag.y = e.clientY;
+      this.applyLook();
+    });
+    const end = (e: PointerEvent) => {
+      if (drag && e.pointerId === drag.id) drag = null;
+    };
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
+  }
+
+  /** Une position (dans le plan) est-elle accessible au visiteur ? */
+  private canStand(p: Pt): boolean {
+    if (!this.plan || !this.room) return true;
+    if (!pointInPolygon(p, this.plan.polygon) || distanceToEdges(p, this.plan.polygon) < VISIT.radius) return false;
+    const r = VISIT.radius;
+    return !this.room.obstacles.some(
+      (o) =>
+        o.bottom < VISIT.bodyHeight &&
+        p.x > o.x - r &&
+        p.x < o.x + o.width + r &&
+        p.z > o.z - r &&
+        p.z < o.z + o.depth + r,
+    );
+  }
+
+  /** Point le plus éloigné des murs et obstacles (échantillonnage sur une grille). */
+  private findOpenSpot(): Pt {
+    const plan = this.plan!;
+    const { minX, maxX, minZ, maxZ } = plan.bbox;
+    let best: Pt = { x: (minX + maxX) / 2, z: (minZ + maxZ) / 2 };
+    let bestScore = -Infinity;
+    const steps = 24;
+    for (let i = 0; i <= steps; i++) {
+      for (let j = 0; j <= steps; j++) {
+        const p = { x: minX + ((maxX - minX) * i) / steps, z: minZ + ((maxZ - minZ) * j) / steps };
+        if (!this.canStand(p)) continue;
+        const score = distanceToEdges(p, plan.polygon);
+        if (score > bestScore) {
+          bestScore = score;
+          best = p;
+        }
+      }
+    }
+    return best;
+  }
+
+  /** Avance le visiteur selon les touches et le joystick, en glissant le long des murs. */
+  private updateVisit(dt: number): void {
+    if (this.keys.has('ArrowLeft')) this.yaw += VISIT.turnSpeed * dt;
+    if (this.keys.has('ArrowRight')) this.yaw -= VISIT.turnSpeed * dt;
+    if (this.keys.has('ArrowLeft') || this.keys.has('ArrowRight')) this.applyLook();
+
+    const k = (code: string) => (this.keys.has(code) ? 1 : 0);
+    let fwd = k('KeyW') + k('ArrowUp') - k('KeyS') - k('ArrowDown') - this.joystick.y;
+    let side = k('KeyD') - k('KeyA') + this.joystick.x;
+    const len = Math.hypot(fwd, side);
+    if (len < 0.01) return;
+    if (len > 1) {
+      fwd /= len;
+      side /= len;
+    }
+    const run = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight');
+    const step = (run ? VISIT.runSpeed : VISIT.walkSpeed) * dt;
+    // Avant = direction du regard projetée au sol.
+    const sin = Math.sin(this.yaw);
+    const cos = Math.cos(this.yaw);
+    const dx = (-sin * fwd + cos * side) * step;
+    const dz = (-cos * fwd - sin * side) * step;
+
+    const c = this.content.position;
+    const pos = { x: this.camera.position.x - c.x, z: this.camera.position.z - c.z };
+    // Si l'on est déjà coincé (pièce modifiée entre-temps), on laisse bouger librement.
+    const free = !this.canStand(pos);
+    const candidates = [
+      { x: pos.x + dx, z: pos.z + dz },
+      { x: pos.x + dx, z: pos.z },
+      { x: pos.x, z: pos.z + dz },
+    ];
+    const next = candidates.find((p) => free || this.canStand(p));
+    if (!next) return;
+    this.camera.position.x = next.x + c.x;
+    this.camera.position.z = next.z + c.z;
+    this.requestRender();
+  }
+
   private tick(): void {
+    const now = performance.now();
+    const dt = Math.min(0.05, (now - this.lastTick) / 1000);
+    this.lastTick = now;
+    if (this.mode === 'visit') this.updateVisit(dt);
+
     // update() renvoie true tant que l'amortissement fait bouger la caméra.
-    const moving = this.controls.update();
+    const moving = this.mode === 'orbit' && this.controls.update();
     if (!moving && !this.needsRender) return;
     this.needsRender = false;
     this.updateWallVisibility();

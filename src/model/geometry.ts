@@ -139,6 +139,32 @@ export function clipConvex(poly: Pt[], f: (p: Pt) => number): Pt[] {
   return res;
 }
 
+/** Le point est-il à l'intérieur du polygone (règle pair-impair) ? */
+export function pointInPolygon(p: Pt, polygon: Pt[]): boolean {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const a = polygon[i];
+    const b = polygon[j];
+    if (a.z > p.z !== b.z > p.z && p.x < ((b.x - a.x) * (p.z - a.z)) / (b.z - a.z) + a.x) inside = !inside;
+  }
+  return inside;
+}
+
+/** Distance du point au contour du polygone. */
+export function distanceToEdges(p: Pt, polygon: Pt[]): number {
+  let best = Infinity;
+  for (let i = 0; i < polygon.length; i++) {
+    const a = polygon[i];
+    const b = polygon[(i + 1) % polygon.length];
+    const ab = sub(b, a);
+    const len2 = dot(ab, ab) || 1e-9;
+    const t = Math.max(0, Math.min(1, dot(sub(p, a), ab) / len2));
+    const q = add(a, mul(ab, t));
+    best = Math.min(best, Math.hypot(p.x - q.x, p.z - q.z));
+  }
+  return best;
+}
+
 /** Segments d'une droite horizontale ou verticale situés à l'intérieur d'un polygone (pour la grille du sol). */
 export function insideSegments(polygon: Pt[], axis: 'x' | 'z', value: number): [number, number][] {
   const other = axis === 'x' ? 'z' : 'x';

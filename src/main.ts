@@ -5,6 +5,7 @@ import { ProjectStore } from './model/store';
 import { SCHEMA_VERSION, type Project } from './model/types';
 import { createAutosaver, loadCurrentProject } from './storage/db';
 import { exportProject, pickProjectFile } from './storage/file';
+import { createJoystick } from './ui/joystick';
 import { Panel } from './ui/panel';
 import { Viewer } from './viewer/viewer';
 
@@ -31,6 +32,11 @@ async function main() {
         <span>Touchez un mur pour y placer la prise</span>
         <button type="button" class="small">Annuler</button>
       </div>
+      <div class="visit-help" hidden role="status">
+        <span class="hint-mouse"><b>ZQSD</b> se déplacer · <b>glisser</b> regarder · <b>Maj</b> courir · <b>Échap</b> quitter</span>
+        <span class="hint-touch"><b>Joystick</b> se déplacer · <b>glisser</b> regarder</span>
+        <button type="button" class="small">Quitter</button>
+      </div>
     </main>
     <button type="button" class="panel-toggle" aria-controls="panel" aria-expanded="false">Réglages</button>
   `;
@@ -40,6 +46,19 @@ async function main() {
   const viewer = new Viewer(viewport);
   const { project, restored, needsSave } = await loadInitialProject();
   const store = new ProjectStore(project);
+
+  // ---------- Visite à pied ----------
+  const visitHelp = viewport.querySelector<HTMLElement>('.visit-help')!;
+  const joystick = createJoystick((x, y) => viewer.setJoystick(x, y));
+  joystick.hidden = true;
+  viewport.appendChild(joystick);
+  visitHelp.querySelector('button')!.addEventListener('click', () => viewer.exitVisit());
+  viewer.onModeChange((mode) => {
+    const visiting = mode === 'visit';
+    visitHelp.hidden = !visiting;
+    joystick.hidden = !visiting || !matchMedia('(pointer: coarse)').matches;
+    document.body.classList.toggle('visiting', visiting);
+  });
 
   // ---------- Placement d'une prise en touchant un mur ----------
   const banner = viewport.querySelector<HTMLElement>('.banner')!;
@@ -72,6 +91,11 @@ async function main() {
   const panel = new Panel(store, {
     onRecenter: () => viewer.frameRoom(getActiveRoom(store.project)),
     onTopView: () => viewer.frameTop(getActiveRoom(store.project)),
+    onVisit: () => {
+      // Le focus quitte le bouton pour que les touches pilotent bien la visite.
+      (document.activeElement as HTMLElement | null)?.blur();
+      viewer.enterVisit();
+    },
     onPlaceOutlet: () => setPlacing(!placing),
     onExport: () => exportProject(store.project),
     onImport: async () => {

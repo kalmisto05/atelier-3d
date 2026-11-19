@@ -394,6 +394,63 @@ button.active {
   border: none;
 }
 
+/* ---------- Visite à pied ---------- */
+.visit-help {
+  position: absolute;
+  top: calc(12px + env(safe-area-inset-top));
+  left: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100% - 24px);
+  padding: 6px 6px 6px 14px;
+  border-radius: 999px;
+  background: rgb(31 26 22 / 0.85);
+  font-size: 0.85rem;
+  z-index: 5;
+}
+.visit-help[hidden] {
+  display: none;
+}
+
+.joystick {
+  position: absolute;
+  left: 24px;
+  bottom: calc(24px + env(safe-area-inset-bottom));
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  background: rgb(255 255 255 / 0.12);
+  border: 2px solid rgb(255 255 255 / 0.35);
+  touch-action: none;
+  z-index: 5;
+}
+.joystick[hidden] {
+  display: none;
+}
+.joystick-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 52px;
+  height: 52px;
+  margin: -26px;
+  border-radius: 50%;
+  background: rgb(243 233 221 / 0.8);
+  pointer-events: none;
+}
+
+body.visiting .viewport canvas {
+  cursor: grab;
+}
+
+@media (max-width: 720px) {
+  /* Laisse la place au bouton « Réglages » en haut à droite. */
+  .visit-help {
+    max-width: calc(100% - 140px);
+  }
+}
+
 .hint-touch {
   display: none;
 }
