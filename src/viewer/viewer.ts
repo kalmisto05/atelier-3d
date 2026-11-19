@@ -62,7 +62,7 @@ export type ViewMode = 'orbit' | 'visit';
 
 /** Élément désigné dans la vue 3D (clic) ou dans le panneau. */
 export type Selection =
-  | { kind: 'wall'; id: string }
+  | { kind: 'wall'; id: string; pointId?: string }
   | { kind: 'opening'; id: string; zone?: 'hole' | 'below' }
   | { kind: 'outlet'; id: string }
   | { kind: 'obstacle'; id: string };
@@ -172,7 +172,7 @@ export class Viewer {
   private raycaster = new THREE.Raycaster();
   private tapListeners = new Set<(pick: Pick | null) => void>();
   private selection: Selection | null = null;
-  private selectionLines: THREE.LineSegments | null = null;
+  private selectionGroup: THREE.Group | null = null;
 
   private room: Room | null = null;
   private mode: ViewMode = 'orbit';
@@ -300,7 +300,7 @@ export class Viewer {
     this.roomGroup.clear();
     this.walls = [];
     this.obstacleMeshes = [];
-    this.selectionLines = null;
+    this.selectionGroup = null;
   }
 
   private buildRoom(room: Room): void {
@@ -577,15 +577,23 @@ export class Viewer {
 
   /** Contour orange de l'élément sélectionné, visible à travers les murs. */
   private drawSelection(): void {
-    if (this.selectionLines) {
-      this.selectionLines.removeFromParent();
-      this.selectionLines.geometry.dispose();
-      (this.selectionLines.material as THREE.Material).dispose();
-      this.selectionLines = null;
+    if (this.selectionGroup) {
+      this.selectionGroup.removeFromParent();
+      this.selectionGroup.traverse((obj) => {
+        if (obj instanceof THREE.LineSegments || obj instanceof THREE.Sprite) {
+          obj.geometry.dispose();
+          const m = obj.material as THREE.Material & { map?: THREE.Texture | null };
+          m.map?.dispose();
+          m.dispose();
+        }
+      });
+      this.selectionGroup = null;
     }
     const sel = this.selection;
     const room = this.room;
     if (!sel || !room || !this.plan) return;
+    const group = new THREE.Group();
+    group.renderOrder = 10;
     const pts: number[] = [];
     const seg = (a: Pt, ya: number, b: Pt, yb: number) => pts.push(a.x, ya, a.z, b.x, yb, b.z);
     const outline = (g: WallGeom, u0: number, u1: number, y0: number, y1: number, d: number) => {
@@ -623,6 +631,7 @@ export class Viewer {
           }
           seg(wallPoint(g, 0, -0.5), 0, wallPoint(g, 0, -0.5), topLine(profile, room.height, 0)(0));
           seg(wallPoint(g, g.length, -0.5), 0, wallPoint(g, g.length, -0.5), topLine(profile, room.height, g.length)(g.length));
+          this.drawProfileMarkers(group, g, room, sel.pointId);
         }
         if (sel.kind === 'opening') {
           const h = this.holes(room, wall, g.length).find((x) => x.id === sel.id);
@@ -637,11 +646,114 @@ export class Viewer {
         }
       }
     }
-    if (!pts.length) return;
-    const material = new THREE.LineBasicMaterial({ color: COLORS.selection, depthTest: false, transparent: true });
-    this.selectionLines = lineSegments(pts, material);
-    this.selectionLines.renderOrder = 10;
-    this.content.add(this.selectionLines);
+    if (pts.length) {
+      const lines = lineSegments(pts, new THREE.LineBasicMaterial({ color: COLORS.selection, depthTest: false, transparent: true }));
+      lines.renderOrder = 10;
+      group.add(lines);
+    }
+    if (!group.children.length) return;
+    this.selectionGroup = group;
+    this.content.add(group);
+  }
+
+  /**
+   * Sommets du haut d'un mur : pastilles numérotées (même numéro que dans la fiche).
+   * Le sommet actif est orange, avec ses deux cotes : distance depuis le début du mur
+   * (le long du sol) et hauteur depuis le sol.
+   */
+  private drawProfileMarkers(group: THREE.Group, g: WallGeom, room: Room, activeId?: string): void {
+    const d = -2; // juste devant le parement intérieur
+    g.wall.profile.forEach((q, k) => {
+      const active = q.id === activeId;
+      const u = Math.max(0, Math.min(g.length, q.u));
+      const h = Math.max(0, Math.min(room.height, q.h));
+      const pos = wallPoint(g, u, d);
+      const marker = this.makeMarker(String(k + 1), active);
+      marker.position.set(pos.x, h, pos.z);
+      marker.userData = { wallId: g.wall.id, pointId: q.id };
+      group.add(marker);
+      if (!active) return;
+
+      // Cotes du sommet actif.
+      const fmt = (v: number) => `${Math.round(v * 10) / 10} cm`;
+      const floorStart = wallPoint(g, 0, d);
+      const pts = [
+        floorStart.x, 0.5, floorStart.z, pos.x, 0.5, pos.z, // distance, au sol
+        pos.x, 0.5, pos.z, pos.x, h, pos.z, // hauteur, à la verticale du sommet
+      ];
+      // Petites marques aux extrémités de la cote de distance.
+      const tick = 8;
+      pts.push(floorStart.x, 0, floorStart.z, floorStart.x, tick, floorStart.z, pos.x, 0, pos.z, pos.x, tick, pos.z);
+      const lines = lineSegments(pts, new THREE.LineBasicMaterial({ color: COLORS.selection, depthTest: false, transparent: true }));
+      lines.renderOrder = 11;
+      group.add(lines);
+
+      if (u > 1) {
+        const midFloor = wallPoint(g, u / 2, d);
+        const distLabel = this.makeTextLabel(`↔ ${fmt(u)}`);
+        distLabel.position.set(midFloor.x, 12, midFloor.z);
+        group.add(distLabel);
+      }
+      if (h > 1) {
+        const heightLabel = this.makeTextLabel(`↕ ${fmt(h)}`);
+        heightLabel.position.set(pos.x, h / 2, pos.z);
+        group.add(heightLabel);
+      }
+    });
+  }
+
+  /** Pastille numérotée de taille constante à l'écran, visible à travers les murs. */
+  private makeMarker(text: string, active: boolean): THREE.Sprite {
+    const canvas = document.createElement('canvas');
+    canvas.width = 96;
+    canvas.height = 96;
+    const ctx = canvas.getContext('2d')!;
+    ctx.fillStyle = active ? '#ff9a3c' : '#f6ead9';
+    ctx.strokeStyle = active ? '#ffffff' : '#ff9a3c';
+    ctx.lineWidth = 8;
+    ctx.beginPath();
+    ctx.arc(48, 48, 40, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.font = '700 46px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = active ? '#ffffff' : '#3c2819';
+    ctx.fillText(text, 48, 51);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    const sprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: texture, depthTest: false, depthWrite: false, sizeAttenuation: false }),
+    );
+    const size = active ? 0.055 : 0.038;
+    sprite.scale.set(size, size, 1);
+    sprite.renderOrder = 12;
+    return sprite;
+  }
+
+  /** Étiquette de cote (texte sur fond sombre), taille constante à l'écran. */
+  private makeTextLabel(text: string): THREE.Sprite {
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 72;
+    const ctx = canvas.getContext('2d')!;
+    ctx.fillStyle = 'rgba(31, 26, 22, 0.88)';
+    ctx.beginPath();
+    ctx.roundRect(4, 4, 248, 64, 32);
+    ctx.fill();
+    ctx.font = '700 36px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ff9a3c';
+    ctx.fillText(text, 128, 38);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    const sprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: texture, depthTest: false, depthWrite: false, sizeAttenuation: false }),
+    );
+    sprite.scale.set(0.12, 0.034, 1);
+    sprite.renderOrder = 13;
+    return sprite;
   }
 
   private makeLabel(text: string): THREE.Sprite {
@@ -705,6 +817,17 @@ export class Viewer {
       -((clientY - rect.top) / rect.height) * 2 + 1,
     );
     this.raycaster.setFromCamera(ndc, this.camera);
+
+    // Les pastilles de sommets (dessinées par-dessus tout) sont prioritaires.
+    const markers = (this.selectionGroup?.children ?? []).filter(
+      (o): o is THREE.Sprite => o instanceof THREE.Sprite && !!o.userData.pointId,
+    );
+    const markerHit = this.raycaster.intersectObjects(markers, false)[0];
+    if (markerHit) {
+      const { wallId, pointId } = markerHit.object.userData as { wallId: string; pointId: string };
+      return { selection: { kind: 'wall', id: wallId, pointId } };
+    }
+
     const visible = this.walls.filter((w) => !w.faded);
     const targets = [...visible.flatMap((w) => w.meshes), ...this.obstacleMeshes];
     const hit = this.raycaster.intersectObjects(targets, false)[0];

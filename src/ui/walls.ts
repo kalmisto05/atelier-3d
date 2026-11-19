@@ -206,15 +206,16 @@ export class WallsSection extends ListSection {
         (q, k) => `
         <div class="profile-row" data-id="${q.id}">
           <span class="profile-index">${k + 1}</span>
-          ${numberField(`pt-${q.id}`, 'u', 'Distance', q.u)}
-          ${numberField(`pt-${q.id}`, 'h', 'Hauteur', q.h)}
+          ${numberField(`pt-${q.id}`, 'u', '↔ Depuis la gauche', q.u)}
+          ${numberField(`pt-${q.id}`, 'h', '↕ Hauteur du sol', q.h)}
           <button type="button" class="small danger" data-action="remove-point" aria-label="Supprimer le sommet ${k + 1}">✕</button>
         </div>`,
       )
       .join('');
     return `
       <div class="profile open">
-        <span class="profile-title">Haut du mur — sommets (distance depuis la gauche, hauteur)</span>
+        <span class="profile-title">Haut du mur — sommets numérotés comme dans la vue 3D.
+          Touchez un champ : le sommet passe en orange, avec ses cotes.</span>
         ${rows}
         <div class="profile-actions">
           <button type="button" class="small" data-action="pick-point">+ Toucher le mur</button>

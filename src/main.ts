@@ -147,8 +147,8 @@ async function main() {
 
   // Travail dans une fiche du panneau : l'élément correspondant est entouré dans la vue 3D.
   panel.el.addEventListener(ITEM_FOCUS_EVENT, (e) => {
-    const { kind, id } = (e as CustomEvent<ItemFocusDetail>).detail;
-    viewer.setSelection({ kind, id });
+    const { kind, id, pointId } = (e as CustomEvent<ItemFocusDetail>).detail;
+    viewer.setSelection(kind === 'wall' ? { kind, id, pointId } : { kind, id });
   });
 
   const autosaver = createAutosaver(400, (status, err) => {

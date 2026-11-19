@@ -144,6 +144,11 @@ export class Panel {
   select(selection: Selection | null): void {
     for (const s of this.sections) {
       if (selection && s.kind === selection.kind) {
+        if (selection.kind === 'wall' && selection.pointId) {
+          // Pastille de sommet touchée : on active directement la hauteur de ce sommet.
+          s.select(selection.id, 'h', selection.pointId);
+          continue;
+        }
         const focusKey = selection.kind === 'opening' && selection.zone === 'below' ? 'recess' : undefined;
         s.select(selection.id, focusKey);
       } else {

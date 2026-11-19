@@ -10,6 +10,8 @@ export const ITEM_FOCUS_EVENT = 'itemfocus';
 export interface ItemFocusDetail {
   kind: ItemKind;
   id: string;
+  /** Sommet du haut du mur en cours de modification (fiches de murs). */
+  pointId?: string;
 }
 
 /**
@@ -45,11 +47,15 @@ export abstract class ListSection {
     this.list = this.root.querySelector('.item-list')!;
 
     this.list.addEventListener('focusin', (e) => {
-      const card = (e.target as HTMLElement).closest<HTMLElement>('.item-card[data-id]');
+      const target = e.target as HTMLElement;
+      const card = target.closest<HTMLElement>('.item-card[data-id]');
       if (!card) return;
-      this.root.dispatchEvent(
-        new CustomEvent<ItemFocusDetail>(ITEM_FOCUS_EVENT, { bubbles: true, detail: { kind: this.kind, id: card.dataset.id! } }),
-      );
+      // Sommet en cours de modification : sa ligne est surlignée (et sa pastille en 3D).
+      const row = target.closest<HTMLElement>('.profile-row[data-id]');
+      this.list.querySelectorAll('.profile-row.active').forEach((r) => r.classList.remove('active'));
+      row?.classList.add('active');
+      const detail: ItemFocusDetail = { kind: this.kind, id: card.dataset.id!, pointId: row?.dataset.id };
+      this.root.dispatchEvent(new CustomEvent<ItemFocusDetail>(ITEM_FOCUS_EVENT, { bubbles: true, detail }));
     });
   }
 
@@ -101,16 +107,18 @@ export abstract class ListSection {
    * Élément choisi dans la vue 3D : ouvre la section, met la fiche en évidence et la fait défiler.
    * `focusKey` désigne un champ à activer directement (ex. le renfoncement sous une fenêtre).
    */
-  select(id: string | null, focusKey?: string): void {
+  select(id: string | null, focusKey?: string, subId?: string): void {
     this.selectedId = id;
     this.markSelected();
     if (!id) return;
     this.root.open = true;
     const card = this.card(id);
     if (!card) return;
-    card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    // Sous-élément (ex. un sommet du haut du mur) : on vise sa ligne dans la fiche.
+    const scope = (subId && card.querySelector<HTMLElement>(`[data-id="${CSS.escape(subId)}"]`)) || card;
+    scope.scrollIntoView({ block: 'center', behavior: 'smooth' });
     if (focusKey) {
-      const input = card.querySelector<HTMLInputElement>(`input[data-key="${focusKey}"]`);
+      const input = scope.querySelector<HTMLInputElement>(`input[data-key="${focusKey}"]`);
       input?.focus({ preventScroll: true });
       input?.select();
     }

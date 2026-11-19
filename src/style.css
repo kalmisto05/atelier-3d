@@ -621,3 +621,15 @@ details.section > summary .count:empty {
   flex-wrap: wrap;
   gap: 6px;
 }
+
+.profile-row.active {
+  margin: 0 -6px 6px;
+  padding: 4px 6px;
+  border-radius: 8px;
+  background: rgb(255 154 60 / 0.16);
+  box-shadow: inset 3px 0 0 #ff9a3c;
+}
+.profile-row.active .profile-index {
+  color: #ff9a3c;
+  font-weight: 700;
+}
