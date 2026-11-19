@@ -1,0 +1,293 @@
+:root {
+  --bg: #1f1a16;
+  --panel: #2b241f;
+  --panel-border: #3d342c;
+  --text: #f3e9dd;
+  --muted: #b9a998;
+  --accent: #c8874a;
+  --accent-strong: #e09a55;
+  --input-bg: #1a1612;
+  --danger: #d9705a;
+  --ok: #8fbf7a;
+  --radius: 10px;
+  --panel-width: 320px;
+  color-scheme: dark;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-size: 16px;
+  line-height: 1.4;
+  color: var(--text);
+  background: var(--bg);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+body {
+  background: var(--bg);
+}
+
+#app {
+  position: fixed;
+  inset: 0;
+  display: flex;
+}
+
+/* ---------- Vue 3D ---------- */
+.viewport {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  order: 2;
+}
+
+.viewport canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* Laisse OrbitControls gérer tous les gestes tactiles (pas de défilement/zoom de page). */
+  touch-action: none;
+  outline: none;
+}
+
+/* ---------- Panneau ---------- */
+.panel {
+  order: 1;
+  width: var(--panel-width);
+  flex-shrink: 0;
+  height: 100%;
+  overflow-y: auto;
+  background: var(--panel);
+  border-right: 1px solid var(--panel-border);
+  padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+}
+
+.panel-handle {
+  display: none;
+}
+
+.panel-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+h1 {
+  font-size: 1.25rem;
+  margin: 0;
+  color: var(--accent-strong);
+}
+
+h2 {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin: 0 0 8px;
+}
+
+section {
+  padding: 14px 0;
+  border-top: 1px solid var(--panel-border);
+}
+
+.status {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.status[data-kind='ok'] {
+  color: var(--ok);
+}
+.status[data-kind='error'] {
+  color: var(--danger);
+}
+
+.field {
+  display: grid;
+  grid-template-columns: 1fr 9.5rem;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 0.95rem;
+}
+
+.input-unit {
+  position: relative;
+  display: block;
+}
+
+.input-unit .unit {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  font-size: 0.85rem;
+  pointer-events: none;
+}
+
+input {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  font: inherit;
+  color: var(--text);
+  background: var(--input-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+}
+
+input[type='number'] {
+  padding-right: 36px;
+  text-align: right;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+input[type='number']::-webkit-inner-spin-button,
+input[type='number']::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+input.invalid {
+  border-color: var(--danger);
+}
+
+.summary,
+.hint {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin: 8px 0 0;
+}
+
+.actions button {
+  display: block;
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+button {
+  min-height: 44px;
+  padding: 10px 14px;
+  font: inherit;
+  font-weight: 600;
+  color: var(--text);
+  background: #3a3029;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+button:hover {
+  background: #47392f;
+}
+button.danger {
+  color: var(--danger);
+}
+
+.hint-touch {
+  display: none;
+}
+@media (pointer: coarse) {
+  .hint-mouse {
+    display: none;
+  }
+  .hint-touch {
+    display: inline;
+  }
+}
+
+.panel-toggle {
+  display: none;
+}
+
+/* ---------- Téléphone : panneau en tiroir ---------- */
+@media (max-width: 720px) {
+  #app {
+    flex-direction: column;
+  }
+
+  .viewport {
+    height: 100%;
+    flex: none;
+    transition: height 0.2s ease;
+  }
+
+  body.panel-open .viewport {
+    height: 42dvh;
+  }
+
+  .panel {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    height: 58dvh;
+    border-right: none;
+    border-top: 1px solid var(--panel-border);
+    border-radius: 16px 16px 0 0;
+    transform: translateY(100%);
+    transition: transform 0.2s ease;
+    padding-top: 8px;
+    z-index: 10;
+  }
+
+  body.panel-open .panel {
+    transform: translateY(0);
+  }
+
+  .panel-handle {
+    display: block;
+    width: 48px;
+    height: 5px;
+    margin: 4px auto 12px;
+    border-radius: 3px;
+    background: var(--panel-border);
+    cursor: pointer;
+  }
+
+  .panel-toggle {
+    display: block;
+    position: fixed;
+    top: calc(12px + env(safe-area-inset-top));
+    right: 12px;
+    z-index: 20;
+    background: var(--accent);
+    color: #1f1a16;
+    border: none;
+    box-shadow: 0 2px 10px rgb(0 0 0 / 0.4);
+  }
+  .panel-toggle:hover {
+    background: var(--accent-strong);
+  }
+
+  /* 16px minimum : évite le zoom automatique du navigateur sur les champs. */
+  input {
+    font-size: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .viewport,
+  .panel {
+    transition: none;
+  }
+}
